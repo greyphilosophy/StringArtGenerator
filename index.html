@@ -39,7 +39,7 @@
 					</div>
 					<div class="form-check form-check-inline">
 					  <input class="form-check-input" type="radio" name="inlineRadioOptions" onclick="show2();"  id="inlineRadio2" value="rectangle">
-					  <label class="form-check-label" for="inlineRadio2">Square</label>
+					  <label class="form-check-label" for="inlineRadio2">Rectangle</label>
 					</div>
 				</div>
 			</div>
@@ -54,6 +54,7 @@
             </div>
         </div>
         <div id="rectangle" style="display:none">
+            <p>Uses the full image in its original proportions. Crop your image to match your frame before uploading. Pin counts include both corners of each side.</p>
 			<div class="row">
 				<div class="col">
 					<div class="form-group">
@@ -94,7 +95,7 @@
                     <img class="centerImage" id="imageSrc" alt="No Image" />
                 </div>
                 <div id="step2" class="inputoutput center hidden">
-                    <div class="caption">Cropped and Grayscaled:</div>
+                    <div class="caption">Prepared and Grayscaled:</div>
                     <canvas class="centerCanvasMedium" id="canvasOutput" ></canvas>
                 </div>
                 <div id="step3" class="inputoutput center hidden">
@@ -110,8 +111,8 @@
                         <button style="float: left;" onclick="example2();">Example 2</button>
                         <button style="float: left;" onclick="example3();">Example 3</button>
                     </div><br/><br/>
-                    <span>Copy these numbers to save for later so you don't have to generate them again.</span><br/>
-                    <span>If you copied the numbers from a previous run, paste them above.</span><br/>
+                    <span>Copy all of this text to save for later so you don't have to generate them again.</span><br/>
+                    <span>Paste saved instructions above. New instructions include the frame shape and dimensions; old comma-separated numbers use the selected shape and pin counts (a square for rectangles).</span><br/>
                     <span>These numbers are used to help walk you through creating this string art</span><br/><br/>
                     <div style="height: 30px;">
                         <button style="float: left;" onclick="startCreating();">Start Creating</button>
@@ -136,7 +137,9 @@
 
 
 <script type="text/javascript">
-let IMG_SIZE = 500;
+let IMG_SIZE = 500; // Maximum processing dimension
+let IMG_WIDTH = IMG_SIZE;
+let IMG_HEIGHT = IMG_SIZE;
 let MAX_LINES = 4000;// 4000;
 let MAX_RLINES = 4000;// 4000;
 let N_PINS = 36*8;
@@ -157,7 +160,7 @@ let isRectangle;
 let imgElement = document.getElementById("imageSrc");
 let inputElement = document.getElementById("fileInput");
 inputElement.addEventListener("change", (e) => {
-  imgElement.src = URL.createObjectURL(e.target.files[0]);
+  if (e.target.files.length) imgElement.src = URL.createObjectURL(e.target.files[0]);
 }, false);
 var ctx=document.getElementById("canvasOutput").getContext("2d");
 var ctx2=document.getElementById("canvasOutput2").getContext("2d");
@@ -213,37 +216,52 @@ imgElement.onload = function() {
     showStep(1);
     showPins.classList.add('hidden');
     incrementalDrawing.classList.add('hidden');
-    // Take uploaded picture, square up and put on canvas
-    base_image = new Image();
-    base_image.src = imgElement.src;
-    ctx.canvas.width = IMG_SIZE;
-    ctx.canvas.height = IMG_SIZE;
-    ctx2.canvas.weight = IMG_SIZE * 2;
-    ctx2.canvas.height = IMG_SIZE * 2;
-    ctx.clearRect(0,0, IMG_SIZE, IMG_SIZE);
-
-    var selectedWidth = base_image.width;
-    var selectedHeight = base_image.height;
-    var xOffset = 0;
-    var yOffset = 0;
-    // square crop  center of picture
-    if(base_image.height > base_image.width){
-        selectedWidth = base_image.width;
-        selectedHeight = base_image.width;
-        yOffset = Math.floor((base_image.height - base_image.width) / 2);
-    }else if(base_image.width > base_image.height) {
-        selectedWidth = base_image.height;
-        selectedHeight = base_image.height;
-        xOffset = Math.floor((base_image.width - base_image.height) / 2)
+    // Use the already-loaded image; a second Image may not have decoded yet.
+    const sourceWidth = imgElement.naturalWidth;
+    const sourceHeight = imgElement.naturalHeight;
+    let selectedWidth = sourceWidth;
+    let selectedHeight = sourceHeight;
+    let xOffset = 0;
+    let yOffset = 0;
+    IMG_WIDTH = IMG_HEIGHT = IMG_SIZE;
+    if (isRectangle) {
+        const scale = IMG_SIZE / Math.max(sourceWidth, sourceHeight);
+        IMG_WIDTH = Math.max(2, Math.round(sourceWidth * scale));
+        IMG_HEIGHT = Math.max(2, Math.round(sourceHeight * scale));
+    } else {
+        selectedWidth = selectedHeight = Math.min(sourceWidth, sourceHeight);
+        xOffset = Math.floor((sourceWidth - selectedWidth) / 2);
+        yOffset = Math.floor((sourceHeight - selectedHeight) / 2);
     }
-
-    ctx.drawImage(base_image, xOffset, yOffset, selectedWidth, selectedHeight, 0, 0, IMG_SIZE, IMG_SIZE);
-    length = IMG_SIZE;
+    N_HPINS = Number(numberOfHPins.value);
+    N_VPINS = Number(numberOfVPins.value);
+    N_PINS = Number(numberOfPins.value);
+    if (isRectangle && (![N_HPINS, N_VPINS].every(n => Number.isInteger(n) && n >= 2) ||
+            N_HPINS > IMG_WIDTH || N_VPINS > IMG_HEIGHT)) {
+        status.textContent = "Use at least 2 pins per side and no more than " +
+            IMG_WIDTH + " horizontal / " + IMG_HEIGHT + " vertical pins.";
+        return;
+    }
+    if ((!isRectangle && (!Number.isInteger(N_PINS) || N_PINS <= MIN_DISTANCE * 2)) ||
+            (isRectangle && 2 * (N_HPINS + N_VPINS) <= MIN_DISTANCE * 2)) {
+        status.textContent = "Use more than " + (MIN_DISTANCE * 2) + " total pins.";
+        return;
+    }
+    ctx.canvas.width = IMG_WIDTH;
+    ctx.canvas.height = IMG_HEIGHT;
+    ctx2.canvas.width = IMG_WIDTH * 2;
+    ctx2.canvas.height = IMG_HEIGHT * 2;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, IMG_WIDTH, IMG_HEIGHT);
+    ctx.drawImage(imgElement, xOffset, yOffset, selectedWidth, selectedHeight,
+        0, 0, IMG_WIDTH, IMG_HEIGHT);
+    length = Math.max(IMG_WIDTH, IMG_HEIGHT);
 
     // make grayscale by averaging the RGB channels.
     // extract out the R channel because that's all we need and push graysacle image onto canvas
-    var imgPixels = ctx.getImageData(0, 0, IMG_SIZE, IMG_SIZE);
-    R = img_result = nj.ones([IMG_SIZE, IMG_SIZE ]).multiply(0xff);
+    var imgPixels = ctx.getImageData(0, 0, IMG_WIDTH, IMG_HEIGHT);
+    R = img_result = nj.ones([IMG_HEIGHT, IMG_WIDTH ]).multiply(0xff);
     var rdata = [];     
     for(var y = 0; y < imgPixels.height; y++){
         for(var x = 0; x < imgPixels.width; x++){
@@ -256,76 +274,36 @@ imgElement.onload = function() {
         }
     }
     R.selection.data = rdata;
-    ctx.putImageData(imgPixels, 0, 0, 0, 0, IMG_SIZE, IMG_SIZE);
+    ctx.putImageData(imgPixels, 0, 0, 0, 0, IMG_WIDTH, IMG_HEIGHT);
 
-    //circle crop canvas
-    ctx.globalCompositeOperation='destination-in';
-    ctx.beginPath();
-    ctx.arc(IMG_SIZE/2,IMG_SIZE/2, IMG_SIZE/2, 0, Math.PI*2);
-    ctx.closePath();
-    ctx.fill();
+    if (!isRectangle) {
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.beginPath();
+        ctx.arc(IMG_WIDTH/2, IMG_HEIGHT/2, IMG_WIDTH/2, 0, Math.PI*2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+    }
 
     // start processing
     NonBlockingCalculatePins();    
 }
  
 function NonBlockingCalculatePins(){
-    // set up necessary variables
-    console.log("Calculating pins...");
-    status.textContent = "Calculating pins...";
-    pin_coords = [];
-	console.log(length);
-    center = length / 2;
-    radius = length / 2 - 1/2;
-    let i = 0;
-    (function codeBlock(){
-		if(isRectangle){
-			N_PINS = (N_HPINS * 2) + (N_VPINS * 2);
-			let pinHDistance = IMG_SIZE/(N_HPINS-1);
-			let pinVDistance = IMG_SIZE/(N_VPINS-1);
-			//need to change this - pins need to be divided across the img length
-			[...Array(N_HPINS).keys()].forEach(element => pin_coords.push([Math.floor(pinHDistance*element),IMG_SIZE]));
-			[...Array(N_VPINS).keys()].reverse().forEach(element => pin_coords.push([IMG_SIZE,Math.floor(pinVDistance*element)]));
-			//pin_coords.push([IMG_SIZE,IMG_SIZE]);
-			[...Array(N_HPINS).keys()].reverse().forEach(element => pin_coords.push([Math.floor(pinHDistance*element),0]));
-			[...Array(N_VPINS).keys()].forEach(element => pin_coords.push([0,Math.floor(pinVDistance*element)]));
-			console.log('Done Calculating pins');
-			status.textContent = "Done Calculating pins";
-			showStep(2);
-			NonBlockingPrecalculateLines();
-		} else {
-			if(i < N_PINS){
-				angle = 2 * Math.PI * i / N_PINS;
-				pin_coords.push([Math.floor(center + radius * Math.cos(angle)),
-					Math.floor(center + radius * Math.sin(angle))]);
-				i++;
-				setTimeout(codeBlock, 0);
-			} else {
-				console.log('Done Calculating pins');
-				status.textContent = "Done Calculating pins";
-				showStep(2);
-				NonBlockingPrecalculateLines();
-			}
-		}
-    })();
-	console.log(pin_coords);
+    CalculatePins();
+    status.textContent = "Done Calculating pins";
+    showStep(2);
+    NonBlockingPrecalculateLines();
 }
 
 function NonBlockingPrecalculateLines(){
     // set up necessary variables
     console.log("Precalculating all lines...");
     status.textContent = "Precalculating all lines...";
-	/*if(isRectangle) {
-	    line_cache_y = Array.apply(null, {length: N_VPINS});
-		line_cache_x = Array.apply(null, {length: N_HPINS});
-		line_cache_length = Array.apply(null, {length: (N_HPINS * N_VPINS)}).map(Function.call, function(){return 0;});
-		line_cache_weight = Array.apply(null, {length: (N_HPINS * N_VPINS)}).map(Function.call, function(){return 1;});
-		} else {*/
-		line_cache_y = Array.apply(null, {length: (N_PINS * N_PINS)});
-		line_cache_x = Array.apply(null, {length: (N_PINS * N_PINS)});
-		line_cache_length = Array.apply(null, {length: (N_PINS * N_PINS)}).map(Function.call, function(){return 0;});
-		line_cache_weight = Array.apply(null, {length: (N_PINS * N_PINS)}).map(Function.call, function(){return 1;});
-	//}
+    line_cache_y = new Array(N_PINS * N_PINS);
+    line_cache_x = new Array(N_PINS * N_PINS);
+    line_cache_length = new Array(N_PINS * N_PINS).fill(0);
+    line_cache_weight = new Array(N_PINS * N_PINS).fill(1);
     let a = 0;
 
     (function codeBlock(){
@@ -363,11 +341,11 @@ function NonBlockingLineCalculator(){
     // set up necessary variables
     console.log("Drawing Lines...");
     status.textContent = "Drawing Lines...";
-    error = nj.ones([IMG_SIZE, IMG_SIZE]).multiply(0xff).subtract(nj.uint8(R.selection.data).reshape(IMG_SIZE, IMG_SIZE));
-    img_result = nj.ones([IMG_SIZE, IMG_SIZE ]).multiply(0xff);    
-    result = nj.ones([IMG_SIZE * SCALE, IMG_SIZE * SCALE]).multiply(0xff);
-    result = new cv.matFromArray(IMG_SIZE * SCALE, IMG_SIZE * SCALE, cv.CV_8UC1, result.selection.data);
-    line_mask = nj.zeros([IMG_SIZE, IMG_SIZE], 'float64');
+    error = nj.ones([IMG_HEIGHT, IMG_WIDTH]).multiply(0xff).subtract(nj.uint8(R.selection.data).reshape(IMG_HEIGHT, IMG_WIDTH));
+    img_result = nj.ones([IMG_HEIGHT, IMG_WIDTH ]).multiply(0xff);
+    result = nj.ones([IMG_HEIGHT * SCALE, IMG_WIDTH * SCALE]).multiply(0xff);
+    result = new cv.matFromArray(IMG_HEIGHT * SCALE, IMG_WIDTH * SCALE, cv.CV_8UC1, result.selection.data);
+    line_mask = nj.zeros([IMG_HEIGHT, IMG_WIDTH], 'float64');
     
     line_sequence = [];
     pin = 0;
@@ -394,6 +372,7 @@ function NonBlockingLineCalculator(){
                     xs = line_cache_x[test_pin * N_PINS + pin];
                     ys = line_cache_y[test_pin * N_PINS + pin];
 
+                    if (!xs || !xs.length) continue;
                     line_err = getLineErr(error, ys, xs) * line_cache_weight[test_pin * N_PINS + pin];
 
                     if( line_err > max_err){
@@ -403,13 +382,17 @@ function NonBlockingLineCalculator(){
                 }
             }
 
+            if (best_pin < 0) {
+                Finalize();
+                return;
+            }
             line_sequence.push(best_pin);
 
             xs = line_cache_x[best_pin * N_PINS + pin];
             ys = line_cache_y[best_pin * N_PINS + pin];
             weight = LINE_WEIGHT * line_cache_weight[best_pin * N_PINS + pin];
             
-            line_mask = nj.zeros([IMG_SIZE, IMG_SIZE], 'float64');
+            line_mask = nj.zeros([IMG_HEIGHT, IMG_WIDTH], 'float64');
             line_mask = setLine(line_mask, ys, xs, weight);
             error = subtractArrays(error, line_mask);
 
@@ -447,7 +430,7 @@ function NonBlockingLineCalculator(){
 }
 
 function draw(){
-    let dsize = new cv.Size(IMG_SIZE * 2, IMG_SIZE * 2);
+    let dsize = new cv.Size(IMG_WIDTH * 2, IMG_HEIGHT * 2);
     let dst = new cv.Mat();
     cv.resize(result, dst, dsize, 0, 0, cv.INTER_AREA);
     cv.imshow('canvasOutput2', dst);
@@ -455,17 +438,22 @@ function draw(){
 }
 
 function Finalize() {
-    let dsize = new cv.Size(IMG_SIZE * 2, IMG_SIZE * 2);
+    let dsize = new cv.Size(IMG_WIDTH * 2, IMG_HEIGHT * 2);
     let dst = new cv.Mat();
     cv.resize(result, dst, dsize, 0, 0, cv.INTER_AREA);
 
     console.log("complete");
-    drawStatus.textContent = MAX_LINES + " Lines drawn | 100% complete";
+    drawStatus.textContent = (line_sequence.length - 1) + " Lines drawn | Complete";
 
     cv.imshow('canvasOutput2', dst);
     console.log(line_sequence);
     status.textContent = "Complete";
-    pinsOutput.value = line_sequence;
+    pinsOutput.value = JSON.stringify({
+        version: 1, shape: isRectangle ? "rectangle" : "circle",
+        width: IMG_WIDTH, height: IMG_HEIGHT,
+        horizontalPins: N_HPINS, verticalPins: N_VPINS,
+        pinCount: N_PINS, sequence: line_sequence
+    });
     showPins.classList.remove('hidden');
     dst.delete(); result.delete();
     window.scrollTo({ top: 5000, left: 0, behavior: 'smooth' });
@@ -592,51 +580,39 @@ var pointIndex = 0;
 var lastStepImage;
 
 function startCreating(){
+    if (!loadInstructions()) return;
     window.speechSynthesis.getVoices();
     incrementalDrawing.classList.remove('hidden');
 
-    base_image2 = new Image();
-    ctx3.canvas.width = IMG_SIZE * 2;
-    ctx3.canvas.height = IMG_SIZE * 2;
-    ctx3.clearRect(0,0, IMG_SIZE * 2, IMG_SIZE * 2);
-    ctx3.drawImage(base_image2, 0, 0, IMG_SIZE * 2, IMG_SIZE * 2);
-
-    line_sequence = pinsOutput.value.split(",").map(V => { return parseInt(V)});
+    ctx3.canvas.width = IMG_WIDTH * 2;
+    ctx3.canvas.height = IMG_HEIGHT * 2;
+    ctx3.clearRect(0,0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
 
     window.scrollTo({ top: 5000, left: 0, behavior: 'smooth' });
 
     incrementalCurrentStep.textContent = "";
     pointIndex = 0;
-    if(pin_coords == null){
-        CalculatePins();
-    }
     nextStep();
     listenForKeys = true;
 }
 
 function startDrawing(){
+    if (!loadInstructions()) return;
     incrementalDrawing.classList.remove('hidden');
     listenForKeys = false;
 
-    base_image2 = new Image();
-    ctx3.canvas.width = IMG_SIZE * 2;
-    ctx3.canvas.height = IMG_SIZE * 2;
-    ctx3.clearRect(0,0, IMG_SIZE * 2, IMG_SIZE * 2);
-    ctx3.drawImage(base_image2, 0, 0, IMG_SIZE * 2, IMG_SIZE * 2);
-
-    line_sequence = pinsOutput.value.split(",").map(V => { return parseInt(V)});
+    ctx3.canvas.width = IMG_WIDTH * 2;
+    ctx3.canvas.height = IMG_HEIGHT * 2;
+    ctx3.clearRect(0,0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
 
     window.scrollTo({ top: 5000, left: 0, behavior: 'smooth' });
 
     incrementalCurrentStep.textContent = "";
     pointIndex = 0;
-    if(pin_coords == null){
-        CalculatePins();
-    }
 
     let j = 0;
     (function codeBlock(){
-        if(j < MAX_LINES - 1){
+        if(j < line_sequence.length - 1){
             //incrementalCurrentStep.textContent = "Current Line: " + (pointIndex + 1) + " |  Pin " + line_sequence[pointIndex] + " to " + line_sequence[pointIndex + 1];
             pointIndex++;
             ctx3.beginPath();
@@ -653,11 +629,11 @@ function startDrawing(){
 }
 
 function nextStep(){
-    if(pointIndex > MAX_LINES - 1){ return;}
+    if(pointIndex >= line_sequence.length - 1){ return;}
     incrementalCurrentStep.textContent = "Current Line: " + (pointIndex + 1) + " |  Pin " + line_sequence[pointIndex] + " to " + line_sequence[pointIndex + 1];
 
     if(pointIndex > 0){
-        //ctx3.clearRect(0,0, IMG_SIZE * 2, IMG_SIZE * 2);
+        //ctx3.clearRect(0,0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
         ctx3.putImageData(lastStepImage, 0, 0);
         ctx3.beginPath();
         ctx3.moveTo(pin_coords[line_sequence[pointIndex - 1]][0] * 2, pin_coords[line_sequence[pointIndex - 1]][1] * 2);
@@ -667,7 +643,7 @@ function nextStep(){
         ctx3.stroke();
     }
     
-    lastStepImage = ctx3.getImageData(0, 0, IMG_SIZE * 2, IMG_SIZE * 2);
+    lastStepImage = ctx3.getImageData(0, 0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
 
     pointIndex++;
     ctx3.beginPath();
@@ -684,7 +660,7 @@ function lastStep(){
     if(pointIndex < 2){ return;}
     pointIndex--;
     pointIndex--;
-    ctx3.clearRect(0,0, IMG_SIZE * 2, IMG_SIZE * 2);
+    ctx3.clearRect(0,0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
     incrementalCurrentStep.textContent = "Current Line: " + (pointIndex + 1) + " |  Pin " + line_sequence[pointIndex] + " to " + line_sequence[pointIndex + 1];
     
     for(i=0; i < pointIndex; i++){
@@ -695,7 +671,7 @@ function lastStep(){
         ctx3.lineWidth = 0.3;
         ctx3.stroke();
     }
-    lastStepImage = ctx3.getImageData(0, 0, IMG_SIZE * 2, IMG_SIZE * 2);
+    lastStepImage = ctx3.getImageData(0, 0, IMG_WIDTH * 2, IMG_HEIGHT * 2);
     pointIndex++;
     ctx3.beginPath();
     ctx3.moveTo(pin_coords[line_sequence[pointIndex - 1]][0] * 2, pin_coords[line_sequence[pointIndex - 1]][1] * 2);
@@ -706,15 +682,70 @@ function lastStep(){
 }
 
 function CalculatePins(){
-    console.log("Calculating pins...");
     pin_coords = [];
-    center = IMG_SIZE / 2;
-    radius = IMG_SIZE / 2 - 1/2
+    if (isRectangle) {
+        // Keep the original numbering: bottom left to right, right bottom to
+        // top, top right to left, then left top to bottom. Corners have two IDs.
+        const right = IMG_WIDTH - 1;
+        const bottom = IMG_HEIGHT - 1;
+        for (let i = 0; i < N_HPINS; i++)
+            pin_coords.push([Math.floor(right * i / (N_HPINS - 1)), bottom]);
+        for (let i = N_VPINS - 1; i >= 0; i--)
+            pin_coords.push([right, Math.floor(bottom * i / (N_VPINS - 1))]);
+        for (let i = N_HPINS - 1; i >= 0; i--)
+            pin_coords.push([Math.floor(right * i / (N_HPINS - 1)), 0]);
+        for (let i = 0; i < N_VPINS; i++)
+            pin_coords.push([0, Math.floor(bottom * i / (N_VPINS - 1))]);
+        N_PINS = pin_coords.length;
+    } else {
+        center = IMG_WIDTH / 2;
+        radius = IMG_WIDTH / 2 - 1/2;
+        for (let i = 0; i < N_PINS; i++) {
+            const angle = 2 * Math.PI * i / N_PINS;
+            pin_coords.push([Math.floor(center + radius * Math.cos(angle)),
+                Math.floor(center + radius * Math.sin(angle))]);
+        }
+    }
+}
 
-    for(i=0; i < N_PINS; i++){
-        angle = 2 * Math.PI * i / N_PINS;
-        pin_coords.push([Math.floor(center + radius * Math.cos(angle)),
-            Math.floor(center + radius * Math.sin(angle))]);
+function loadInstructions() {
+    try {
+        const text = pinsOutput.value.trim();
+        if (!text.startsWith("{") && !/^\d+(\s*,\s*\d+)*$/.test(text)) {
+            throw new Error("Invalid pin sequence");
+        }
+        const saved = text.startsWith("{") ? JSON.parse(text) : {
+            version: 1, shape: document.getElementById("inlineRadio2").checked ? "rectangle" : "circle",
+            width: IMG_SIZE, height: IMG_SIZE,
+            horizontalPins: Number(numberOfHPins.value), verticalPins: Number(numberOfVPins.value),
+            pinCount: Number(numberOfPins.value), sequence: text.split(",").map(Number)
+        };
+        const rectangle = saved.shape === "rectangle";
+        if (saved.version !== 1 || !["circle", "rectangle"].includes(saved.shape) ||
+                ![saved.width, saved.height].every(n => Number.isInteger(n) && n >= 2 && n <= IMG_SIZE) ||
+                (!rectangle && saved.width !== saved.height) ||
+                (rectangle && (![saved.horizontalPins, saved.verticalPins].every(n => Number.isInteger(n) && n >= 2) ||
+                    saved.horizontalPins > saved.width || saved.verticalPins > saved.height)) ||
+                (!rectangle && (!Number.isInteger(saved.pinCount) || saved.pinCount < 2 || saved.pinCount > 10000))) {
+            throw new Error("Invalid frame settings");
+        }
+        const count = rectangle ? 2 * (saved.horizontalPins + saved.verticalPins) : saved.pinCount;
+        if (!Array.isArray(saved.sequence) || saved.sequence.length < 2 ||
+                !saved.sequence.every(n => Number.isInteger(n) && n >= 0 && n < count)) {
+            throw new Error("Invalid pin sequence");
+        }
+        isRectangle = rectangle;
+        IMG_WIDTH = saved.width;
+        IMG_HEIGHT = saved.height;
+        N_HPINS = saved.horizontalPins;
+        N_VPINS = saved.verticalPins;
+        N_PINS = count;
+        line_sequence = saved.sequence;
+        CalculatePins();
+        return true;
+    } catch (error) {
+        status.textContent = "Could not load instructions: " + error.message;
+        return false;
     }
 }
 
