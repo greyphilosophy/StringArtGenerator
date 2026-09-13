@@ -33,12 +33,15 @@ async function page() {
 }
 const image = (w = 300, h = 180) => ({name: 'test-pattern.svg', mimeType: 'image/svg+xml',
     buffer: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="#f0aa19"/><ellipse cx="${w / 2}" cy="${h / 2}" rx="${w / 3}" ry="${h / 3}" fill="#c81e32"/><circle cx="${w / 2}" cy="${h / 2}" r="${h / 5}" fill="#1e50dc"/></svg>`)});
-async function generate(p, w = 300, h = 180, lines = 60) {
+async function configure(p, lines = 60) {
     await p.getByLabel('Rectangle', {exact: true}).check();
     await p.getByLabel('Thread plan', {exact: true}).selectOption('color');
     await p.getByLabel('Number of Horizontal Pins', {exact: true}).fill('12');
     await p.getByLabel('Number of Vertical Pins', {exact: true}).fill('12');
     await p.getByLabel('Number of Lines', {exact: true}).fill(String(lines));
+}
+async function generate(p, w = 300, h = 180, lines = 60) {
+    await configure(p, lines);
     await p.locator('#fileInput').setInputFiles(image(w, h));
     await p.getByRole('heading', {name: 'Color plan complete', exact: true}).waitFor({timeout: 60000});
     return JSON.parse(await p.locator('#pinsOutput').inputValue());
@@ -49,6 +52,11 @@ test('upload → worker → shopping list → colored playback → fresh-session
     try {
         const plan = await generate(p);
         assert.equal(plan.version, 2);
+        assert.equal(plan.background, 'transparent');
+        assert.equal(await p.locator('#backgroundMode').inputValue(), 'transparent');
+        assert.equal(await p.locator('#boardColor').isVisible(), false);
+        assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.classList.contains('transparent-preview')), true);
+        assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 === 3 && v < 255)), true);
         assert.ok(plan.palette.length > 0 && plan.palette.length <= 5);
         assert.equal(plan.width / plan.height, 500 / 300);
         assert.match(await p.locator('#colorSummary').innerText(), /buy about/);
@@ -97,6 +105,42 @@ test('portrait layout, cancelled work and invalid input recover cleanly', async 
         await p.locator('#pinsOutput').fill('0,20,40');
         await p.getByRole('button', {name: 'Just Draw', exact: true}).click();
         assert.equal(await p.locator('#colorSummary').isVisible(), false);
+        assert.equal(await p.locator('#canvasOutput3').evaluate(c => c.classList.contains('transparent-preview')), false);
+        assert.deepEqual(errors, []);
+    } finally { await p.close(); }
+});
+
+test('upload alpha is preserved, white needs thread on an open frame, solid boards remain optional', async () => {
+    const {p, errors} = await page();
+    try {
+        await configure(p, 20);
+        const whiteOnTransparent = {name: 'white-on-transparent.svg', mimeType: 'image/svg+xml',
+            buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180"><rect x="60" y="0" width="180" height="180" fill="white"/></svg>')};
+        await p.locator('#fileInput').setInputFiles(whiteOnTransparent);
+        await p.getByRole('heading', {name: 'Color plan complete', exact: true}).waitFor({timeout: 60000});
+        const open = JSON.parse(await p.locator('#pinsOutput').inputValue());
+        assert.deepEqual(open.palette, ['#ffffff']);
+        assert.ok(open.layers.length > 0);
+        const sourceAlpha = await p.locator('#canvasOutput').evaluate(c => {
+            const ctx = c.getContext('2d');
+            return [ctx.getImageData(0, 0, 1, 1).data[3], ctx.getImageData(c.width / 2, c.height / 2, 1, 1).data[3]];
+        });
+        assert.deepEqual(sourceAlpha, [0, 255], 'upload must not flatten transparent pixels onto a matte');
+        await p.getByLabel('Background', {exact: true}).selectOption('solid');
+        assert.equal(await p.locator('#boardColor').isVisible(), true);
+        await p.locator('#fileInput').setInputFiles(whiteOnTransparent);
+        await p.waitForFunction(() => document.querySelector('#status').textContent.startsWith('No improving thread paths found.'));
+        const solid = JSON.parse(await p.locator('#pinsOutput').inputValue());
+        assert.equal(solid.background, '#ffffff');
+        assert.deepEqual(solid.layers, []);
+        assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.classList.contains('transparent-preview')), false);
+        assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.getContext('2d').getImageData(0, 0, 1, 1).data[3]), 255);
+        await p.reload();
+        await p.getByRole('button', {name: 'Click Here', exact: true}).click();
+        await p.locator('#pinsOutput').fill(JSON.stringify(solid));
+        await p.getByRole('button', {name: 'Just Draw', exact: true}).click();
+        assert.equal(await p.locator('#canvasOutput3').evaluate(c => c.getContext('2d').getImageData(0, 0, 1, 1).data[3]), 255);
+        assert.equal(await p.locator('#canvasOutput3').evaluate(c => c.classList.contains('transparent-preview')), false);
         assert.deepEqual(errors, []);
     } finally { await p.close(); }
 });
