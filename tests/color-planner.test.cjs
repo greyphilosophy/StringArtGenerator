@@ -84,7 +84,7 @@ test('repeating a covered route still costs length and buildup', () => {
     assert.ok(C.objective(twice, context) > 2 * C.objective(one, context));
 });
 
-test('palette keeps five distinct image colors and ignores the board', () => {
+test('initial palette keeps five distinct image colors; a blank board needs none', () => {
     const context = C.prepare(fixture());
     assert.equal(context.palette.length, 5);
     assert.equal(new Set(context.palette.map(C.hex)).size, 5);
@@ -122,6 +122,68 @@ test('colors share the full budget and stop when further moves lose net value', 
     const usage = new Map([[edge.key, used]]);
     for (const color of context.palette) assert.equal(
         C.chooseMoves(finished[0].sequence.at(-1), data, color, null, usage, context, 2, true).moves.length, 0);
+});
+
+for (const [name, background, thread] of [['white', white, black], ['black', black, white]]) {
+    test(`${name} board color can be selected as thread to cover an earlier path`, () => {
+        const graph = {'0:1': line(0, 1), '0:2': line(1), '1:2': line(0)};
+        const target = C.canvas(2, thread); target.set(background, 0);
+        const context = {size: 2, background, target, palette: [thread], coverage: 0.5,
+            raster: {pins: [0, 1, 2], line(a, b) { return graph[[a, b].sort().join(':')]; }}};
+        const layers = [{color: 0, sequence: [0, 1]}], before = C.objective(layers, context);
+        assert.equal(C.considerBackgroundThread(layers, context, 1, 3).added, false, 'respect the one-color limit');
+        const result = C.considerBackgroundThread(layers, context, 2, 3);
+        assert.equal(result.added, true);
+        assert.deepEqual(context.palette[result.layers.at(-1).color], background);
+        assert.ok(C.objective(result.layers, context) < before);
+        assert.ok(result.layers.reduce((n, l) => n + l.sequence.length - 1, 0) <= 3);
+        assert.deepEqual(layers, [{color: 0, sequence: [0, 1]}], 'candidate searches must preserve the existing paths');
+    });
+}
+
+test('background thread competes for a full palette and is rejected when it only causes harm', () => {
+    const graph = {'0:1': line(0, 1), '0:2': line(1), '1:2': line(0)};
+    const target = C.canvas(2, black); target.set(white, 0);
+    const context = {size: 2, background: white, target, palette: [black, [1, 0, 0]], coverage: 0.5,
+        raster: {pins: [0, 1, 2], line(a, b) { return graph[[a, b].sort().join(':')]; }}};
+    const layers = [{color: 0, sequence: [0, 1]}, {color: 1, sequence: [0, 2]}];
+    const before = C.objective(layers, context), result = C.considerBackgroundThread(layers, context, 2, 3);
+    assert.equal(result.added, true);
+    assert.equal(new Set(result.layers.map(l => l.color)).size, 2);
+    assert.ok(result.layers.some(l => C.hex(context.palette[l.color]) === '#ffffff'));
+    assert.ok(!result.layers.some(l => l.color === 1), 'replace the less useful color to stay within the limit');
+    assert.ok(C.objective(result.layers, context) < before);
+    const dark = {...context, palette: [black], target: C.canvas(2, black)};
+    const rejected = C.considerBackgroundThread(layers.slice(0, 1), dark, 2, 10);
+    assert.equal(rejected.added, false);
+    assert.deepEqual(dark.palette, [black], 'do not retain an unused background swatch');
+});
+
+test('white thread restores bright features while a blank white image still needs no string', () => {
+    const width = 48, height = 36, rgba = new Uint8ClampedArray(width * height * 4), highlights = [];
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+        const bright = Math.abs(y - (10 + x * 0.25)) < 1.2 || Math.hypot(x - 29, y - 21) < 5;
+        rgba.set(bright ? [255, 255, 255, 255] : [48, 32, 16, 255], (y * width + x) * 4);
+        if (bright) highlights.push(y * width + x);
+    }
+    const options = {width, height, rgba, shape: 'rectangle', horizontalPins: 16, verticalPins: 12,
+        pinCount: 56, maxLines: 1500, frameLongestCm: 15, threadDiameterMm: 1, background: '#ffffff'};
+    const plain = C.plan({...options, maxColors: 1}), repaired = C.plan({...options, maxColors: 2});
+    const error = plan => {
+        const pixels = C.render(plan).rgba;
+        return highlights.reduce((sum, p) => sum + [0, 1, 2].reduce((n, c) => n + (255 - pixels[p * 4 + c]) ** 2, 0), 0);
+    };
+    assert.ok(repaired.palette.includes('#ffffff'));
+    assert.equal(repaired.stats.backgroundThreadAdded, true);
+    assert.ok(error(repaired) < error(plain) * 0.9, 'white winding must improve the bright details');
+    assert.ok(repaired.stats.finalError < plain.stats.finalError);
+    assert.ok(C.steps(repaired).length <= options.maxLines);
+    assert.deepEqual(C.render(repaired), C.render(JSON.parse(JSON.stringify(repaired))));
+    rgba.fill(255);
+    const blank = C.plan({...options, maxColors: 2});
+    assert.deepEqual(blank.palette, []);
+    assert.deepEqual(C.steps(blank), []);
+    assert.equal(blank.stats.backgroundThreadAdded, false);
 });
 
 test('tonal-detail image keeps dark centers distinct within the same winding budget', () => {

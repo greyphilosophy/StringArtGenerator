@@ -293,6 +293,9 @@
         for (let p = 0; p < target.length / 3; p++) {
             if (!mask[p]) continue;
             const color = perceived(Array.from(target.slice(p * 3, p * 3 + 3)));
+            // Seed the initial palette with colors that change the bare board.
+            // The board color is also tested as actual thread after winding,
+            // when it can restore highlights or cover unwanted earlier paths.
             if (distance(color, board) < 0.0002) continue;
             const key = color.map(x => Math.floor(x * 31)).join(',');
             if (!bins.has(key)) bins.set(key, {sum: [0, 0, 0], count: 0});
@@ -464,6 +467,34 @@
         }
         return {layers: best};
     }
+    function considerBackgroundThread(layers, context, maxColors, maxLines, progress) {
+        const used = new Set(layers.map(layer => layer.color));
+        if (!layers.length || maxColors < 2) return {layers, added: false};
+        let color = context.palette.findIndex(candidate => hex(candidate) === hex(context.background));
+        if (used.has(color)) return {layers, added: false};
+        const appended = color < 0;
+        if (appended) { color = context.palette.length; context.palette.push(context.background.slice()); }
+        let best = layers, bestCost = objective(layers, context);
+        // Try an extra spool when there is room, and replacements when colors
+        // or lines are already exhausted. Removing a spool frees its entire
+        // path budget; retained spools keep their connected paths unchanged.
+        const replacements = layers.map((_, i) => i);
+        if (used.size < maxColors) replacements.unshift(-1);
+        for (let i = 0; i < replacements.length; i++) {
+            if (progress) progress(i, replacements.length);
+            const prefix = layers.filter((_, index) => index !== replacements[i]);
+            const budget = maxLines - prefix.reduce((sum, layer) => sum + layer.sequence.length - 1, 0);
+            if (budget < 1) continue;
+            const replacement = optimizeLayer(color, prefix, [], budget, context);
+            if (replacement.sequence.length < 2) continue;
+            const trial = prefix.concat(replacement), cost = objective(trial, context);
+            // White is not mandatory: its complete benefit must outweigh the
+            // lost color, all damaged pixels, and material/buildup costs.
+            if (cost < bestCost - 1e-10) { best = trial; bestCost = cost; }
+        }
+        if (best === layers && appended) context.palette.pop();
+        return {layers: best, added: best !== layers};
+    }
     function plan(options, progress = () => {}) {
         const context = prepare(options), palette = context.palette;
         const original = palette.map((_, i) => i);
@@ -494,6 +525,9 @@
             if (objective(trial, context) < objective(layers, context) - 1e-10) { layers = trial; refinedLayers++; }
         }
         layers = reorder(layers.filter(l => l.sequence.length > 1), context).layers;
+        const backgroundThread = considerBackgroundThread(layers, context, options.maxColors, options.maxLines,
+            (completed, total) => progress({stage: 'Checking background-colored thread', completed, total}));
+        layers = backgroundThread.added ? reorder(backgroundThread.layers, context).layers : layers;
         const usedColors = [...new Set(layers.map(l => l.color))];
         const saved = {
             version: 2, mode: 'color', shape: options.shape, width: options.width, height: options.height,
@@ -503,6 +537,7 @@
             render: {model: MODEL, width: context.width, height: context.height, coverage: context.coverage},
             layers: layers.map(l => ({color: usedColors.indexOf(l.color), sequence: l.sequence})),
             stats: {errorMetric: 'detail-weighted-srgb-v1',
+                backgroundThreadAdded: backgroundThread.added,
                 initialError: pixelError(canvas(context.size, context.background), context.target, context.displayTarget, context.weights),
                 finalError: pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights), refinedLayers,
                 temporaryHarmMoves: layers.reduce((n, l) => n + l.temporaryHarm, 0),
@@ -556,5 +591,5 @@
     return {plan, render, steps, shoppingList, validatePlan, makePins,
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
-        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers};
+        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread};
 });
