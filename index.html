@@ -84,10 +84,34 @@
 				</div>
 			</div>
 		</div>
+        <div class="form-group">
+            <label for="renderMode">Thread plan</label>
+            <select class="form-control" id="renderMode" onchange="showColorOptions();">
+                <option value="mono">Black string</option>
+                <option value="color">Automatic colors</option>
+            </select>
+        </div>
+        <div id="colorOptions" class="hidden">
+            <p>Choose up to five colors from your image and plan their winding order. Number of Lines is the total budget across all colors.</p>
+            <div class="row">
+                <div class="col"><label for="colorCount">Maximum colors</label>
+                    <input class="form-control" id="colorCount" type="number" min="1" max="5" value="5"></div>
+                <div class="col"><label for="boardColor">Background color</label>
+                    <input class="form-control" id="boardColor" type="color" value="#ffffff"></div>
+            </div>
+            <div class="row">
+                <div class="col"><label for="frameLongestCm">Longest frame side / circle diameter (cm)</label>
+                    <input class="form-control" id="frameLongestCm" type="number" min="1" max="1000" step="0.1" value="60"></div>
+                <div class="col"><label for="threadDiameterMm">Thread diameter (mm)</label>
+                    <input class="form-control" id="threadDiameterMm" type="number" min="0.01" max="5" step="0.01" value="0.4"></div>
+            </div>
+            <p>Use approximate thread colors to match the recommended swatches. Diameter and frame size affect the coverage preview and length estimates. Line Weight applies only to black string.</p>
+        </div>
 		<label class="btn btn-primary btn-file">
 			Click Here and select an Image to Start  <input type="file" id="fileInput" style="display: none;">
 		</label>
-	</div>
+        <button class="btn btn-secondary hidden" id="cancelColor" onclick="cancelColorGeneration();">Cancel color planning</button>
+    </div>
         
         <div class="row">
             <div class="col">
@@ -95,7 +119,7 @@
                     <img class="centerImage" id="imageSrc" alt="No Image" />
                 </div>
                 <div id="step2" class="inputoutput center hidden">
-                    <div class="caption">Prepared and Grayscaled:</div>
+                    <div class="caption">Prepared image:</div>
                     <canvas class="centerCanvasMedium" id="canvasOutput" ></canvas>
                 </div>
                 <div id="step3" class="inputoutput center hidden">
@@ -104,6 +128,7 @@
                     <canvas class="centerCanvasLarge" id="canvasOutput2" ></canvas>
                 </div>
                 <div id="showPins" class="inputoutput center hidden">
+                    <div id="colorSummary" class="hidden" aria-live="polite"></div>
                     <textarea id="pinsOutput" rows="10" cols="100"></textarea>
                     <div class="centerBorderless">
                         <span>These examples will overwrite your generated output. Please copy your output first if you need to before clicking an example button.</span><br/><br/>
@@ -136,6 +161,7 @@
 
 
 
+<script src="color-planner.js"></script>
 <script type="text/javascript">
 let IMG_SIZE = 500; // Maximum processing dimension
 let IMG_WIDTH = IMG_SIZE;
@@ -210,6 +236,16 @@ let listenForKeys = false;
 //*******************************
 
 imgElement.onload = function() {
+    if (generationBusy) return;
+    playbackToken++;
+    inputElement.value = ''; // Permit selecting the same image after changing settings.
+    if (document.getElementById('renderMode').value !== 'color' &&
+            (typeof nj === 'undefined' || typeof cv === 'undefined' || typeof cv.Mat !== 'function')) {
+        status.textContent = 'Please wait: black-string image processing is still loading.';
+        return;
+    }
+    colorPlan = null;
+    document.getElementById('colorSummary').classList.add('hidden');
 	isRectangle = document.getElementById("inlineRadio2").checked;
 	isRectangle && console.log("This is a rectangle");
     listenForKeys = false;
@@ -252,12 +288,17 @@ imgElement.onload = function() {
     ctx2.canvas.width = IMG_WIDTH * 2;
     ctx2.canvas.height = IMG_HEIGHT * 2;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'white';
+    ctx.fillStyle = document.getElementById('renderMode').value === 'color' ? document.getElementById('boardColor').value : 'white';
     ctx.fillRect(0, 0, IMG_WIDTH, IMG_HEIGHT);
     ctx.drawImage(imgElement, xOffset, yOffset, selectedWidth, selectedHeight,
         0, 0, IMG_WIDTH, IMG_HEIGHT);
     length = Math.max(IMG_WIDTH, IMG_HEIGHT);
 
+    if (document.getElementById('renderMode').value === 'color') {
+        startColorGeneration();
+        return;
+    }
+    setGenerationBusy(true);
     // make grayscale by averaging the RGB channels.
     // extract out the R channel because that's all we need and push graysacle image onto canvas
     var imgPixels = ctx.getImageData(0, 0, IMG_WIDTH, IMG_HEIGHT);
@@ -438,6 +479,7 @@ function draw(){
 }
 
 function Finalize() {
+    setGenerationBusy(false);
     let dsize = new cv.Size(IMG_WIDTH * 2, IMG_HEIGHT * 2);
     let dst = new cv.Mat();
     cv.resize(result, dst, dsize, 0, 0, cv.INTER_AREA);
@@ -580,7 +622,9 @@ var pointIndex = 0;
 var lastStepImage;
 
 function startCreating(){
-    if (!loadInstructions()) return;
+    if (generationBusy || !loadInstructions()) return;
+    playbackToken++;
+    if (colorPlan) { startColorPlayback(false); return; }
     window.speechSynthesis.getVoices();
     incrementalDrawing.classList.remove('hidden');
 
@@ -597,7 +641,9 @@ function startCreating(){
 }
 
 function startDrawing(){
-    if (!loadInstructions()) return;
+    if (generationBusy || !loadInstructions()) return;
+    const run = ++playbackToken;
+    if (colorPlan) { startColorPlayback(true); return; }
     incrementalDrawing.classList.remove('hidden');
     listenForKeys = false;
 
@@ -612,6 +658,7 @@ function startDrawing(){
 
     let j = 0;
     (function codeBlock(){
+        if (run !== playbackToken) return;
         if(j < line_sequence.length - 1){
             //incrementalCurrentStep.textContent = "Current Line: " + (pointIndex + 1) + " |  Pin " + line_sequence[pointIndex] + " to " + line_sequence[pointIndex + 1];
             pointIndex++;
@@ -629,6 +676,7 @@ function startDrawing(){
 }
 
 function nextStep(){
+    if (colorPlan) { colorStep(1); return; }
     if(pointIndex >= line_sequence.length - 1){ return;}
     incrementalCurrentStep.textContent = "Current Line: " + (pointIndex + 1) + " |  Pin " + line_sequence[pointIndex] + " to " + line_sequence[pointIndex + 1];
 
@@ -657,6 +705,7 @@ function nextStep(){
 }
 
 function lastStep(){
+    if (colorPlan) { colorStep(-1); return; }
     if(pointIndex < 2){ return;}
     pointIndex--;
     pointIndex--;
@@ -682,30 +731,9 @@ function lastStep(){
 }
 
 function CalculatePins(){
-    pin_coords = [];
-    if (isRectangle) {
-        // Keep the original numbering: bottom left to right, right bottom to
-        // top, top right to left, then left top to bottom. Corners have two IDs.
-        const right = IMG_WIDTH - 1;
-        const bottom = IMG_HEIGHT - 1;
-        for (let i = 0; i < N_HPINS; i++)
-            pin_coords.push([Math.floor(right * i / (N_HPINS - 1)), bottom]);
-        for (let i = N_VPINS - 1; i >= 0; i--)
-            pin_coords.push([right, Math.floor(bottom * i / (N_VPINS - 1))]);
-        for (let i = N_HPINS - 1; i >= 0; i--)
-            pin_coords.push([Math.floor(right * i / (N_HPINS - 1)), 0]);
-        for (let i = 0; i < N_VPINS; i++)
-            pin_coords.push([0, Math.floor(bottom * i / (N_VPINS - 1))]);
-        N_PINS = pin_coords.length;
-    } else {
-        center = IMG_WIDTH / 2;
-        radius = IMG_WIDTH / 2 - 1/2;
-        for (let i = 0; i < N_PINS; i++) {
-            const angle = 2 * Math.PI * i / N_PINS;
-            pin_coords.push([Math.floor(center + radius * Math.cos(angle)),
-                Math.floor(center + radius * Math.sin(angle))]);
-        }
-    }
+    pin_coords = ColorPlanner.makePins({shape: isRectangle ? 'rectangle' : 'circle',
+        width: IMG_WIDTH, height: IMG_HEIGHT, horizontalPins: N_HPINS, verticalPins: N_VPINS, pinCount: N_PINS});
+    N_PINS = pin_coords.length;
 }
 
 function loadInstructions() {
@@ -720,6 +748,10 @@ function loadInstructions() {
             horizontalPins: Number(numberOfHPins.value), verticalPins: Number(numberOfVPins.value),
             pinCount: Number(numberOfPins.value), sequence: text.split(",").map(Number)
         };
+        if (saved.version === 2) {
+            applyColorPlan(ColorPlanner.validatePlan(saved));
+            return true;
+        }
         const rectangle = saved.shape === "rectangle";
         if (saved.version !== 1 || !["circle", "rectangle"].includes(saved.shape) ||
                 ![saved.width, saved.height].every(n => Number.isInteger(n) && n >= 2 && n <= IMG_SIZE) ||
@@ -734,6 +766,8 @@ function loadInstructions() {
                 !saved.sequence.every(n => Number.isInteger(n) && n >= 0 && n < count)) {
             throw new Error("Invalid pin sequence");
         }
+        colorPlan = null;
+        document.getElementById('colorSummary').classList.add('hidden');
         isRectangle = rectangle;
         IMG_WIDTH = saved.width;
         IMG_HEIGHT = saved.height;
@@ -783,9 +817,12 @@ function example3(){
 function onOpenCvReady() {
     // even when this is called, sometimes it's still not ready, adding slight time buffer
     setTimeout(function(){
-        document.getElementById('status').innerHTML = 'Generator is ready.';
+        if (!generationBusy && status.textContent.startsWith('Please wait:')) status.textContent = 'Generator is ready.';
     }, 1000);
 
+}
+
+function initializeInputs() {
     numberOfPins.value = N_PINS;
     numberOfPins.addEventListener("keyup", function(event) {
         N_PINS = parseInt(event.target.value);
@@ -809,7 +846,9 @@ function onOpenCvReady() {
         LINE_WEIGHT = parseInt(event.target.value);
     });
 }
+initializeInputs();
 </script>
+<script src="color-ui.js"></script>
 <script async src="opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
 <script src="https://code.jquery.com/jquery-3.2.1.slim.min.js" integrity="sha384-KJ3o2DKtIkvYIK3UENzmM7KCkRr/rE9/Qpg6aAZGJwFDMVNA/GpGFF93hXpG5KkN" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/gh/nicolaspanel/numjs@0.15.1/dist/numjs.min.js"></script>

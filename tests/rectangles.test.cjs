@@ -52,12 +52,14 @@ function harness() {
             dst.cols = size.width; dst.rows = size.height;
         }, imshow(id, mat) { element(id).width = mat.cols; element(id).height = mat.rows; }
     };
-    const context = vm.createContext({document: {getElementById: element, body: {}},
+    const context = vm.createContext({document: {getElementById: element, querySelectorAll: () => [], body: {}},
         window: {scrollTo() {}, speechSynthesis: {getVoices() {}}}, console: {log() {}},
         URL: {createObjectURL() {}}, setTimeout(fn) { jobs.push(fn); }, cv,
         nj: {ones: shape => matrix(shape, 1), zeros: shape => matrix(shape), uint8: data => matrix([data.length], 0, Uint8Array.from(data))}});
     const run = code => vm.runInContext(code, context);
+    context.ColorPlanner = require('../color-planner.js');
     run(script);
+    run(fs.readFileSync(require('node:path').join(__dirname, '../color-ui.js'), 'utf8'));
     run('onOpenCvReady(); IMG_SIZE = 50; SCALE = 2; MAX_LINES = 12;');
     element('numberOfHPins').value = '12'; element('numberOfVPins').value = '12';
     const flush = () => { let limit = 10000; while (jobs.length) { assert.ok(limit-- > 0); jobs.shift()(); } };

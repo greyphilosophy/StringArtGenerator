@@ -55,3 +55,15 @@ textarea {
 textarea {
     max-width: 100%;
 }
+
+#colorOptions .row { margin-bottom: 1rem; }
+#colorSummary { text-align: left; overflow-wrap: anywhere; }
+#colorSummary li { margin-bottom: 0.6rem; }
+.thread-swatch {
+    display: inline-block;
+    width: 2rem;
+    height: 2rem;
+    margin-right: 0.5rem;
+    border: 1px solid #666;
+    vertical-align: middle;
+}
