@@ -10,6 +10,12 @@ status.textContent = 'Choose a thread plan and upload an image.';
 function showColorOptions() {
     document.getElementById('colorOptions').classList.toggle('hidden', document.getElementById('renderMode').value !== 'color');
 }
+function showBackgroundOptions() {
+    document.getElementById('boardOptions').classList.toggle('hidden', document.getElementById('backgroundMode').value !== 'solid');
+}
+function selectedColorBackground() {
+    return document.getElementById('backgroundMode').value === 'solid' ? document.getElementById('boardColor').value : 'transparent';
+}
 function setGenerationBusy(busy) {
     generationBusy = busy;
     document.querySelectorAll('.jumbotron input, .jumbotron select, .jumbotron button').forEach(el => {
@@ -30,7 +36,7 @@ function startColorGeneration() {
             shape: isRectangle ? 'rectangle' : 'circle', width: IMG_WIDTH, height: IMG_HEIGHT,
             horizontalPins: N_HPINS, verticalPins: N_VPINS, pinCount: N_PINS,
             rgba: ctx.getImageData(0, 0, IMG_WIDTH, IMG_HEIGHT).data,
-            background: document.getElementById('boardColor').value,
+            background: selectedColorBackground(),
             maxColors: Number(document.getElementById('colorCount').value),
             maxLines: Number(numberOfLines.value),
             frameLongestCm: Number(document.getElementById('frameLongestCm').value),
@@ -106,7 +112,8 @@ function showColorSummary() {
     note.textContent = 'Match these swatches approximately. Wind the layers in the listed order; tie off before changing colors. Buy lengths include 20% extra plus 1 metre per layer for wraps and knots. Actual coverage and overlap will vary.';
     summary.appendChild(note);
     const frame = document.createElement('p');
-    frame.textContent = 'Background ' + colorPlan.background + ' · Longest side / diameter ' + colorPlan.frameLongestCm + ' cm · Thread diameter ' + colorPlan.threadDiameterMm + ' mm';
+    frame.textContent = (colorPlan.background === 'transparent' ? 'Open frame · Transparent background' : 'Solid board ' + colorPlan.background) +
+        ' · Longest side / diameter ' + colorPlan.frameLongestCm + ' cm · Thread diameter ' + colorPlan.threadDiameterMm + ' mm';
     summary.appendChild(frame);
     const list = document.createElement('ol');
     for (const item of ColorPlanner.shoppingList(colorPlan)) {
@@ -137,6 +144,7 @@ function paintColorPlan(context, limit = Infinity) {
     small.putImageData(pixels, 0, 0);
     context.canvas.width = colorPlan.width * 2;
     context.canvas.height = colorPlan.height * 2;
+    context.canvas.classList.toggle('transparent-preview', colorPlan.background === 'transparent');
     context.drawImage(buffer, 0, 0, context.canvas.width, context.canvas.height);
 }
 function startColorPlayback(automatic) {

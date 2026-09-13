@@ -67,3 +67,10 @@ textarea {
     border: 1px solid #666;
     vertical-align: middle;
 }
+
+/* A display aid only: exported canvas pixels keep their real alpha values. */
+.transparent-preview {
+    background-color: #fff;
+    background-image: conic-gradient(#d6d6d6 25%, #fff 0 50%, #d6d6d6 0 75%, #fff 0);
+    background-size: 16px 16px;
+}

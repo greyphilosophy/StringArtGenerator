@@ -11,7 +11,7 @@ function harness() {
     const elements = new Map(), jobs = [], images = [], arcs = [], strokes = [];
     function element(id) {
         if (!elements.has(id)) {
-            const el = {value: '', checked: false, style: {}, classList: {add() {}, remove() {}}, addEventListener() {}};
+            const el = {value: '', checked: false, style: {}, classList: {add() {}, remove() {}, toggle() {}}, addEventListener() {}};
             const ctx = {canvas: el, clearRect() {}, fillRect() {}, beginPath() {}, closePath() {}, fill() {},
                 arc(...args) { arcs.push(args); }, drawImage(...args) { images.push(args.slice(1)); },
                 getImageData(x, y, width, height) {

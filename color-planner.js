@@ -5,6 +5,7 @@
 })(typeof self !== 'undefined' ? self : globalThis, function () {
     'use strict';
     const MODEL = 'linear-coverage-v1';
+    const TRANSPARENT_MODEL = 'linear-coverage-alpha-v1';
     const CHANNEL_WEIGHTS = [0.2126, 0.7152, 0.0722];
     const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
     const toLinear = x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
@@ -12,6 +13,7 @@
     const rgb = hex => [1, 3, 5].map(i => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255));
     const hex = color => '#' + color.map(x => Math.round(clamp(toSrgb(x), 0, 1) * 255).toString(16).padStart(2, '0')).join('');
     const validHex = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+    const validBackground = value => value === 'transparent' || validHex(value);
     function distance(a, b) {
         let sum = 0;
         for (let c = 0; c < 3; c++) sum += CHANNEL_WEIGHTS[c] * (a[c] - b[c]) ** 2;
@@ -47,8 +49,9 @@
         if (!plan || plan.version !== 2 || plan.mode !== 'color') throw new Error('Unsupported color instructions.');
         validateFrame(plan);
         const render = plan.render;
-        if (!validHex(plan.background) || !Array.isArray(plan.palette) || plan.palette.length > 5 || !plan.palette.every(validHex) ||
-            !render || render.model !== MODEL || !Number.isInteger(render.width) || !Number.isInteger(render.height) ||
+        if (!validBackground(plan.background) || !Array.isArray(plan.palette) || plan.palette.length > 5 || !plan.palette.every(validHex) ||
+            !render || render.model !== (plan.background === 'transparent' ? TRANSPARENT_MODEL : MODEL) ||
+            !Number.isInteger(render.width) || !Number.isInteger(render.height) ||
             render.width < 2 || render.height < 2 || render.width > 200 || render.height > 200 ||
             Math.abs(render.width / render.height - plan.width / plan.height) > 2 / render.height ||
             !Number.isFinite(render.coverage) || render.coverage <= 0 || render.coverage > 0.95 ||
@@ -72,6 +75,9 @@
     }
     function canvas(size, background) {
         const data = new Float64Array(size * 3);
+        // Transparent images store premultiplied linear RGB plus coverage.
+        // Solid boards retain the original RGB representation and arithmetic.
+        if (background === null) { data.alpha = new Float64Array(size); return data; }
         for (let i = 0; i < data.length; i++) data[i] = background[i % 3];
         return data;
     }
@@ -88,10 +94,24 @@
     function pixelError(data, target, displayTarget, weights) {
         let error = 0;
         for (let i = 0; i < data.length; i++) {
+            if (data.alpha) {
+                const p = Math.floor(i / 3);
+                const blackTarget = displayTarget ? displayTarget[i] : displayValue(target[i]);
+                const whiteTarget = displayTarget ? displayTarget.white[i] : displayValue(target[i] + 1 - target.alpha[p]);
+                error += (weights ? weights[p] : 1) * transparentError(data[i], data.alpha[p], blackTarget, whiteTarget) / 3;
+                continue;
+            }
             error += (weights ? weights[Math.floor(i / 3)] : 1) * (displayTarget ? (displayValue(data[i]) - displayTarget[i]) ** 2 / 3 :
                 CHANNEL_WEIGHTS[i % 3] * (data[i] - target[i]) ** 2);
         }
         return error;
+    }
+    // Compare the image on BOTH black and white backdrops. This accounts for
+    // uncovered space without pretending it supplies either thread color.
+    // Source alpha is preserved: an empty transparent target needs no thread.
+    function transparentError(value, alpha, blackTarget, whiteTarget) {
+        return ((displayValue(value) - blackTarget) ** 2 +
+            (displayValue(value + 1 - alpha) - whiteTarget) ** 2) / 2;
     }
     // Partial pixel coverage models opaque, thin threads viewed from a distance.
     // It is deliberately not RGB light addition or a claim of perfect occlusion.
@@ -99,6 +119,7 @@
         for (const pixel of line.pixels) {
             const offset = pixel * 3;
             for (let c = 0; c < 3; c++) data[offset + c] += coverage * (color[c] - data[offset + c]);
+            if (data.alpha) data.alpha[pixel] += coverage * (1 - data.alpha[pixel]);
         }
     }
     function scoreLine(data, target, line, color, coverage, suffix, displayTarget, weights) {
@@ -106,11 +127,20 @@
         for (const pixel of line.pixels) {
             const offset = pixel * 3;
             const transmission = suffix ? suffix.transmission[pixel] : 1;
+            const oldAlpha = data.alpha ? 1 - transmission * (1 - data.alpha[pixel]) : 1;
+            const newAlpha = data.alpha ? oldAlpha + transmission * coverage * (1 - data.alpha[pixel]) : 1;
             for (let c = 0; c < 3; c++) {
                 const old = data[offset + c];
                 const overlay = suffix ? suffix.overlay[offset + c] : 0;
                 const oldFinal = transmission * old + overlay;
                 const newFinal = transmission * (old + coverage * (color[c] - old)) + overlay;
+                if (data.alpha) {
+                    const blackTarget = displayTarget ? displayTarget[offset + c] : displayValue(target[offset + c]);
+                    const whiteTarget = displayTarget ? displayTarget.white[offset + c] : displayValue(target[offset + c] + 1 - target.alpha[pixel]);
+                    gain += (weights ? weights[pixel] : 1) * (transparentError(oldFinal, oldAlpha, blackTarget, whiteTarget) -
+                        transparentError(newFinal, newAlpha, blackTarget, whiteTarget)) / 3;
+                    continue;
+                }
                 const before = displayTarget ? displayValue(oldFinal) - displayTarget[offset + c] : oldFinal - target[offset + c];
                 const after = displayTarget ? displayValue(newFinal) - displayTarget[offset + c] : newFinal - target[offset + c];
                 gain += (weights ? weights[pixel] : 1) * (displayTarget ? 1 / 3 : CHANNEL_WEIGHTS[c]) * (before * before - after * after);
@@ -218,6 +248,7 @@
         if (budget < 2 || !lookahead) return best;
         for (const first of moves.slice(0, 4)) {
             const old = new Float64Array(first.line.pixels.length * 3);
+            const oldAlpha = data.alpha ? Float64Array.from(first.line.pixels, p => data.alpha[p]) : null;
             let j = 0;
             for (const p of first.line.pixels) for (let c = 0; c < 3; c++) old[j++] = data[p * 3 + c];
             applyLine(data, first.line, color, context.coverage);
@@ -228,6 +259,7 @@
             if (count) usage.set(first.line.key, count); else usage.delete(first.line.key);
             j = 0;
             for (const p of first.line.pixels) for (let c = 0; c < 3; c++) data[p * 3 + c] = old[j++];
+            if (oldAlpha) first.line.pixels.forEach((p, i) => { data.alpha[p] = oldAlpha[i]; });
         }
         return best;
     }
@@ -289,15 +321,20 @@
         return weights;
     }
     function choosePalette(target, background, count, mask) {
-        const bins = new Map(), board = perceived(background);
+        const bins = new Map(), board = background === null ? null : perceived(background);
         for (let p = 0; p < target.length / 3; p++) {
             if (!mask[p]) continue;
-            const color = perceived(Array.from(target.slice(p * 3, p * 3 + 3)));
-            if (distance(color, board) < 0.0002) continue;
+            const alpha = target.alpha ? target.alpha[p] : 1;
+            if (alpha <= 0) continue;
+            const color = perceived(Array.from(target.slice(p * 3, p * 3 + 3), c => clamp(c / alpha, 0, 1)));
+            // Seed the initial palette with colors that change the bare board.
+            // The board color is also tested as actual thread after winding,
+            // when it can restore highlights or cover unwanted earlier paths.
+            if (board && distance(color, board) < 0.0002) continue;
             const key = color.map(x => Math.floor(x * 31)).join(',');
             if (!bins.has(key)) bins.set(key, {sum: [0, 0, 0], count: 0});
-            const bin = bins.get(key); bin.count++;
-            for (let c = 0; c < 3; c++) bin.sum[c] += color[c];
+            const bin = bins.get(key); bin.count += alpha;
+            for (let c = 0; c < 3; c++) bin.sum[c] += color[c] * alpha;
         }
         const samples = [...bins.values()].map(b => ({color: b.sum.map(v => v / b.count), weight: b.count}));
         samples.sort((a, b) => b.weight - a.weight);
@@ -318,7 +355,7 @@
         const preserveDark = count > 1 && luminance(light) - luminance(dark) > 0.15;
         // Thread seen through small light gaps must be darker than the
         // desired shadow. Reserve 2% background contribution at this endpoint.
-        const shadowThread = dark.map((c, i) => toSrgb(clamp((toLinear(c) - 0.02 * background[i]) / 0.98, 0, 1)));
+        const shadowThread = background === null ? dark : dark.map((c, i) => toSrgb(clamp((toLinear(c) - 0.02 * background[i]) / 0.98, 0, 1)));
         const centers = [preserveDark ? shadowThread : samples[0].color];
         while (centers.length < count) {
             let candidate, score = 0;
@@ -344,33 +381,38 @@
     }
     function prepare(options) {
         validateFrame(options);
-        if (!options.rgba || options.rgba.length !== options.width * options.height * 4 || !validHex(options.background) ||
+        const backgroundName = options.background === undefined ? 'transparent' : options.background;
+        if (!options.rgba || options.rgba.length !== options.width * options.height * 4 || !validBackground(backgroundName) ||
             !Number.isInteger(options.maxColors) || options.maxColors < 1 || options.maxColors > 5 ||
             !Number.isInteger(options.maxLines) || options.maxLines < 1 || options.maxLines > 10000 ||
             !Number.isFinite(options.frameLongestCm) || options.frameLongestCm <= 0 || options.frameLongestCm > 1000 ||
             !Number.isFinite(options.threadDiameterMm) || options.threadDiameterMm <= 0 || options.threadDiameterMm > 5) throw new Error('Invalid color generation settings.');
         const scale = Math.min(1, 160 / Math.max(options.width, options.height));
         const width = Math.max(2, Math.round(options.width * scale)), height = Math.max(2, Math.round(options.height * scale));
-        const size = width * height, background = rgb(options.background), target = canvas(size, background), mask = new Uint8Array(size);
-        // Area-average source pixels in linear light, compositing transparency
-        // on the chosen board color before palette selection or scoring.
+        const size = width * height, background = backgroundName === 'transparent' ? null : rgb(backgroundName);
+        const target = canvas(size, background), mask = new Uint8Array(size);
+        // Area-average premultiplied source pixels in linear light. Only a
+        // selected solid board supplies color beneath transparent source pixels.
         for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
             const p = y * width + x;
             if (options.shape === 'circle' && ((x + 0.5 - width / 2) / (width / 2)) ** 2 + ((y + 0.5 - height / 2) / (height / 2)) ** 2 > 1) continue;
             mask[p] = 1;
-            const sum = [0, 0, 0]; let n = 0;
+            const sum = [0, 0, 0]; let n = 0, alphaSum = 0;
             for (let sy = Math.floor(y * options.height / height); sy < Math.floor((y + 1) * options.height / height); sy++) {
                 for (let sx = Math.floor(x * options.width / width); sx < Math.floor((x + 1) * options.width / width); sx++) {
                     const off = (sy * options.width + sx) * 4, alpha = options.rgba[off + 3] / 255;
-                    for (let c = 0; c < 3; c++) sum[c] += alpha * toLinear(options.rgba[off + c] / 255) + (1 - alpha) * background[c];
+                    for (let c = 0; c < 3; c++) sum[c] += alpha * toLinear(options.rgba[off + c] / 255) + (background ? (1 - alpha) * background[c] : 0);
+                    alphaSum += alpha;
                     n++;
                 }
             }
             for (let c = 0; c < 3; c++) target[p * 3 + c] = sum[c] / n;
+            if (target.alpha) target.alpha[p] = alphaSum / n;
         }
         const coverage = clamp(options.threadDiameterMm * (Math.max(width, height) - 1) / (options.frameLongestCm * 10), 0.001, 0.95);
         const displayTarget = Float64Array.from(target, toSrgb);
-        return {width, height, size, background, target, mask, coverage, displayTarget,
+        if (target.alpha) displayTarget.white = Float64Array.from(target, (value, i) => toSrgb(clamp(value + 1 - target.alpha[Math.floor(i / 3)], 0, 1)));
+        return {width, height, size, background, backgroundName, target, mask, coverage, displayTarget,
             weights: detailWeights(displayTarget, mask, width, height), raster: rasterizer(options, width, height),
             palette: choosePalette(target, background, options.maxColors, mask)};
     }
@@ -400,6 +442,13 @@
                     for (let l = index; l < layers.length; l++) {
                         if (l > index) delta *= transmission[l][p];
                         through[l][p * 3 + c] += delta;
+                    }
+                }
+                if (through[index].alpha) {
+                    let delta = context.coverage * (1 - through[index].alpha[p]);
+                    for (let l = index; l < layers.length; l++) {
+                        if (l > index) delta *= transmission[l][p];
+                        through[l].alpha[p] += delta;
                     }
                 }
                 transmission[index][p] *= 1 - context.coverage;
@@ -464,6 +513,34 @@
         }
         return {layers: best};
     }
+    function considerBackgroundThread(layers, context, maxColors, maxLines, progress) {
+        const used = new Set(layers.map(layer => layer.color));
+        if (context.background === null || !layers.length || maxColors < 2) return {layers, added: false};
+        let color = context.palette.findIndex(candidate => hex(candidate) === hex(context.background));
+        if (used.has(color)) return {layers, added: false};
+        const appended = color < 0;
+        if (appended) { color = context.palette.length; context.palette.push(context.background.slice()); }
+        let best = layers, bestCost = objective(layers, context);
+        // Try an extra spool when there is room, and replacements when colors
+        // or lines are already exhausted. Removing a spool frees its entire
+        // path budget; retained spools keep their connected paths unchanged.
+        const replacements = layers.map((_, i) => i);
+        if (used.size < maxColors) replacements.unshift(-1);
+        for (let i = 0; i < replacements.length; i++) {
+            if (progress) progress(i, replacements.length);
+            const prefix = layers.filter((_, index) => index !== replacements[i]);
+            const budget = maxLines - prefix.reduce((sum, layer) => sum + layer.sequence.length - 1, 0);
+            if (budget < 1) continue;
+            const replacement = optimizeLayer(color, prefix, [], budget, context);
+            if (replacement.sequence.length < 2) continue;
+            const trial = prefix.concat(replacement), cost = objective(trial, context);
+            // White is not mandatory: its complete benefit must outweigh the
+            // lost color, all damaged pixels, and material/buildup costs.
+            if (cost < bestCost - 1e-10) { best = trial; bestCost = cost; }
+        }
+        if (best === layers && appended) context.palette.pop();
+        return {layers: best, added: best !== layers};
+    }
     function plan(options, progress = () => {}) {
         const context = prepare(options), palette = context.palette;
         const original = palette.map((_, i) => i);
@@ -494,15 +571,19 @@
             if (objective(trial, context) < objective(layers, context) - 1e-10) { layers = trial; refinedLayers++; }
         }
         layers = reorder(layers.filter(l => l.sequence.length > 1), context).layers;
+        const backgroundThread = considerBackgroundThread(layers, context, options.maxColors, options.maxLines,
+            (completed, total) => progress({stage: 'Checking background-colored thread', completed, total}));
+        layers = backgroundThread.added ? reorder(backgroundThread.layers, context).layers : layers;
         const usedColors = [...new Set(layers.map(l => l.color))];
         const saved = {
             version: 2, mode: 'color', shape: options.shape, width: options.width, height: options.height,
             horizontalPins: options.horizontalPins, verticalPins: options.verticalPins, pinCount: makePins(options).length,
-            background: options.background, palette: usedColors.map(i => hex(palette[i])),
+            background: context.backgroundName, palette: usedColors.map(i => hex(palette[i])),
             frameLongestCm: options.frameLongestCm, threadDiameterMm: options.threadDiameterMm,
-            render: {model: MODEL, width: context.width, height: context.height, coverage: context.coverage},
+            render: {model: context.background === null ? TRANSPARENT_MODEL : MODEL, width: context.width, height: context.height, coverage: context.coverage},
             layers: layers.map(l => ({color: usedColors.indexOf(l.color), sequence: l.sequence})),
-            stats: {errorMetric: 'detail-weighted-srgb-v1',
+            stats: {errorMetric: context.background === null ? 'detail-weighted-srgb-two-backdrops-v1' : 'detail-weighted-srgb-v1',
+                backgroundThreadAdded: backgroundThread.added,
                 initialError: pixelError(canvas(context.size, context.background), context.target, context.displayTarget, context.weights),
                 finalError: pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights), refinedLayers,
                 temporaryHarmMoves: layers.reduce((n, l) => n + l.temporaryHarm, 0),
@@ -515,12 +596,13 @@
     function render(plan, limit = Infinity) {
         validatePlan(plan);
         const {width, height, coverage} = plan.render;
-        const context = {size: width * height, background: rgb(plan.background), palette: plan.palette.map(rgb),
+        const context = {size: width * height, background: plan.background === 'transparent' ? null : rgb(plan.background), palette: plan.palette.map(rgb),
             raster: rasterizer(plan, width, height), coverage};
         const data = renderLayers(plan.layers, context, limit), rgba = new Uint8ClampedArray(width * height * 4);
         for (let p = 0; p < width * height; p++) {
-            for (let c = 0; c < 3; c++) rgba[p * 4 + c] = Math.round(clamp(toSrgb(data[p * 3 + c]), 0, 1) * 255);
-            rgba[p * 4 + 3] = 255;
+            const alpha = data.alpha ? clamp(data.alpha[p], 0, 1) : 1;
+            for (let c = 0; c < 3; c++) rgba[p * 4 + c] = alpha ? Math.round(clamp(toSrgb(data[p * 3 + c] / alpha), 0, 1) * 255) : 0;
+            rgba[p * 4 + 3] = Math.round(alpha * 255);
             if (plan.shape === 'circle' && ((p % width + 0.5 - width / 2) / (width / 2)) ** 2 + ((Math.floor(p / width) + 0.5 - height / 2) / (height / 2)) ** 2 > 1) rgba[p * 4 + 3] = 0;
         }
         return {width, height, rgba};
@@ -556,5 +638,5 @@
     return {plan, render, steps, shoppingList, validatePlan, makePins,
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
-        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers};
+        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread};
 });

@@ -96,9 +96,15 @@
             <div class="row">
                 <div class="col"><label for="colorCount">Maximum colors</label>
                     <input class="form-control" id="colorCount" type="number" min="1" max="5" value="5"></div>
-                <div class="col"><label for="boardColor">Background color</label>
+                <div class="col"><label for="backgroundMode">Background</label>
+                    <select class="form-control" id="backgroundMode" onchange="showBackgroundOptions();">
+                        <option value="transparent" selected>Transparent (open frame)</option>
+                        <option value="solid">Solid board</option>
+                    </select></div>
+                <div class="col hidden" id="boardOptions"><label for="boardColor">Board color</label>
                     <input class="form-control" id="boardColor" type="color" value="#ffffff"></div>
             </div>
+            <p>Transparent plans use thread for both light and dark areas. The checkerboard shows gaps where your surroundings will remain visible. Choose a solid board if your strings will have a backing.</p>
             <div class="row">
                 <div class="col"><label for="frameLongestCm">Longest frame side / circle diameter (cm)</label>
                     <input class="form-control" id="frameLongestCm" type="number" min="1" max="1000" step="0.1" value="60"></div>
@@ -246,6 +252,8 @@ imgElement.onload = function() {
     }
     colorPlan = null;
     document.getElementById('colorSummary').classList.add('hidden');
+    ctx2.canvas.classList.remove('transparent-preview');
+    ctx3.canvas.classList.remove('transparent-preview');
 	isRectangle = document.getElementById("inlineRadio2").checked;
 	isRectangle && console.log("This is a rectangle");
     listenForKeys = false;
@@ -288,8 +296,13 @@ imgElement.onload = function() {
     ctx2.canvas.width = IMG_WIDTH * 2;
     ctx2.canvas.height = IMG_HEIGHT * 2;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = document.getElementById('renderMode').value === 'color' ? document.getElementById('boardColor').value : 'white';
-    ctx.fillRect(0, 0, IMG_WIDTH, IMG_HEIGHT);
+    const colorMode = document.getElementById('renderMode').value === 'color';
+    ctx.canvas.classList.toggle('transparent-preview', colorMode && selectedColorBackground() === 'transparent');
+    ctx.canvas.style.backgroundColor = colorMode ? selectedColorBackground() : '';
+    if (!colorMode) {
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, IMG_WIDTH, IMG_HEIGHT);
+    }
     ctx.drawImage(imgElement, xOffset, yOffset, selectedWidth, selectedHeight,
         0, 0, IMG_WIDTH, IMG_HEIGHT);
     length = Math.max(IMG_WIDTH, IMG_HEIGHT);
@@ -768,6 +781,8 @@ function loadInstructions() {
         }
         colorPlan = null;
         document.getElementById('colorSummary').classList.add('hidden');
+        ctx2.canvas.classList.remove('transparent-preview');
+        ctx3.canvas.classList.remove('transparent-preview');
         isRectangle = rectangle;
         IMG_WIDTH = saved.width;
         IMG_HEIGHT = saved.height;
