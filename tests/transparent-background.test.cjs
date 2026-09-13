@@ -16,7 +16,7 @@ test('default open frame requires white thread for a white image; a white board 
     const options = fixture(), open = C.plan(options);
     assert.equal(open.background, 'transparent');
     assert.equal(open.render.model, 'linear-coverage-alpha-v1');
-    assert.equal(open.stats.errorMetric, 'detail-weighted-srgb-two-backdrops-v1');
+    assert.equal(open.stats.errorMetric, 'detail-boundary-srgb-two-backdrops-v1');
     assert.deepEqual(open.palette, ['#ffffff']);
     assert.ok(C.steps(open).length > 0 && C.steps(open).length <= options.maxLines);
     assert.ok(open.stats.finalError < open.stats.initialError);
@@ -114,7 +114,8 @@ test('lookahead restores alpha; shared-layer insertion and final scoring agree',
     const plan = C.plan(options), final = C.canvas(context.size, context.background);
     for (const layer of plan.layers) for (let i = 1; i < layer.sequence.length; i++)
         C.applyLine(final, context.raster.line(layer.sequence[i - 1], layer.sequence[i]), C.rgb(plan.palette[layer.color]), plan.render.coverage);
-    close(C.pixelError(final, context.target, context.displayTarget, context.weights), plan.stats.finalError);
+    close(C.imageError(final, context), plan.stats.finalError);
+    close(plan.stats.pixelError + plan.stats.boundaryError, plan.stats.finalError);
     assert.ok(C.steps(plan).length <= options.maxLines);
     assert.deepEqual(C.render(plan), C.render(JSON.parse(JSON.stringify(plan))));
 });

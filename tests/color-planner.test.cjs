@@ -197,7 +197,7 @@ test('tonal-detail image keeps dark centers distinct within the same winding bud
     for (let i = 0; i < rgba.length; i++) if (i % 4 !== 3) squared += (rgba[i] - options.rgba[i]) ** 2;
     assert.ok(Math.sqrt(squared / (options.width * options.height * 3)) < 27, 'preserve the overall color image too');
     assert.ok(C.steps(plan).length <= options.maxLines);
-    assert.equal(plan.stats.errorMetric, 'detail-weighted-srgb-v1');
+    assert.equal(plan.stats.errorMetric, 'detail-boundary-srgb-v1');
 });
 
 test('existing version 2 paths still use the original linear-light coverage model', () => {
@@ -237,7 +237,8 @@ for (const [name, w, h] of [['landscape', 32, 20], ['portrait', 20, 32], ['squar
         let rendered = C.canvas(context.size, context.background);
         for (const layer of plan.layers) for (let i = 1; i < layer.sequence.length; i++)
             C.applyLine(rendered, context.raster.line(layer.sequence[i - 1], layer.sequence[i]), C.rgb(plan.palette[layer.color]), plan.render.coverage);
-        close(C.pixelError(rendered, context.target, context.displayTarget, context.weights), plan.stats.finalError);
+        close(C.imageError(rendered, context), plan.stats.finalError);
+        close(plan.stats.pixelError + plan.stats.boundaryError, plan.stats.finalError);
         for (const item of C.shoppingList(plan)) assert.ok(item.suggestedMetres > item.pathMetres);
         for (let l = 0; l < plan.layers.length; l++) {
             const steps = C.steps(plan).filter(s => s.layer === l);

@@ -113,6 +113,59 @@
         return ((displayValue(value) - blackTarget) ** 2 +
             (displayValue(value + 1 - alpha) - whiteTarget) ** 2) / 2;
     }
+    function makeBoundaries(target, mask, width, height, strength = 2) {
+        // Signed color differences across short horizontal/vertical spans.
+        // Keep real source boundaries, including subtle gray-on-white seams;
+        // tiny changes below 4% display-RGB RMS are treated as texture/noise.
+        const from = [], to = [], size = width * height, counts = new Uint32Array(size);
+        const span = Math.min(2, width - 1, height - 1);
+        function add(p, q) {
+            if (!mask[p] || !mask[q]) return;
+            let contrast = 0;
+            for (let c = 0; c < 3; c++) {
+                contrast += (target[p * 3 + c] - target[q * 3 + c]) ** 2;
+                if (target.white) contrast += (target.white[p * 3 + c] - target.white[q * 3 + c]) ** 2;
+            }
+            if (contrast / (target.white ? 6 : 3) < 0.04 ** 2) return;
+            from.push(p); to.push(q); counts[p]++; counts[q]++;
+        }
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const p = y * width + x;
+            if (x + span < width) add(p, p + span);
+            if (y + span < height) add(p, p + span * width);
+        }
+        const offsets = new Uint32Array(size + 1);
+        for (let p = 0; p < size; p++) offsets[p + 1] = offsets[p] + counts[p];
+        const neighbors = new Uint32Array(offsets[size]), cursor = offsets.slice();
+        for (let e = 0; e < from.length; e++) {
+            neighbors[cursor[from[e]]++] = to[e]; neighbors[cursor[to[e]]++] = from[e];
+        }
+        return {target, strength, from: Uint32Array.from(from), to: Uint32Array.from(to), offsets, neighbors,
+            // Reusable candidate storage bounds allocations in the inner loop.
+            stamp: new Uint32Array(size), serial: 0, before: new Float64Array(size * 6), delta: new Float64Array(size * 6)};
+    }
+    function boundaryError(data, boundaries) {
+        if (!boundaries) return 0;
+        const {target, from, to, strength} = boundaries;
+        let error = 0;
+        for (let e = 0; e < from.length; e++) {
+            const p = from[e], q = to[e];
+            for (let c = 0; c < 3; c++) {
+                const a = p * 3 + c, b = q * 3 + c;
+                const difference = displayValue(data[a]) - displayValue(data[b]) - (target[a] - target[b]);
+                error += difference * difference;
+                if (data.alpha) {
+                    const whiteDifference = displayValue(data[a] + 1 - data.alpha[p]) - displayValue(data[b] + 1 - data.alpha[q]) -
+                        (target.white[a] - target.white[b]);
+                    error += whiteDifference * whiteDifference;
+                }
+            }
+        }
+        return strength * error / (data.alpha ? 6 : 3);
+    }
+    function imageError(data, context) {
+        return pixelError(data, context.target, context.displayTarget, context.weights) + boundaryError(data, context.boundaries);
+    }
     // Partial pixel coverage models opaque, thin threads viewed from a distance.
     // It is deliberately not RGB light addition or a claim of perfect occlusion.
     function applyLine(data, line, color, coverage) {
@@ -122,18 +175,35 @@
             if (data.alpha) data.alpha[pixel] += coverage * (1 - data.alpha[pixel]);
         }
     }
-    function scoreLine(data, target, line, color, coverage, suffix, displayTarget, weights) {
+    function scoreLine(data, target, line, color, coverage, suffix, displayTarget, weights, boundaries) {
         let gain = 0;
+        let serial = 0;
+        if (boundaries) {
+            serial = boundaries.serial = (boundaries.serial + 1) >>> 0;
+            if (!serial) { boundaries.stamp.fill(0); serial = boundaries.serial = 1; }
+        }
         for (const pixel of line.pixels) {
             const offset = pixel * 3;
             const transmission = suffix ? suffix.transmission[pixel] : 1;
             const oldAlpha = data.alpha ? 1 - transmission * (1 - data.alpha[pixel]) : 1;
             const newAlpha = data.alpha ? oldAlpha + transmission * coverage * (1 - data.alpha[pixel]) : 1;
+            const touchesBoundary = boundaries && boundaries.offsets[pixel + 1] > boundaries.offsets[pixel];
+            if (touchesBoundary) boundaries.stamp[pixel] = serial;
             for (let c = 0; c < 3; c++) {
                 const old = data[offset + c];
                 const overlay = suffix ? suffix.overlay[offset + c] : 0;
                 const oldFinal = transmission * old + overlay;
                 const newFinal = transmission * (old + coverage * (color[c] - old)) + overlay;
+                if (touchesBoundary) {
+                    const b = boundaries, i = pixel * 6 + c, oldVisible = displayValue(oldFinal);
+                    b.before[i] = oldVisible - b.target[offset + c];
+                    b.delta[i] = displayValue(newFinal) - oldVisible;
+                    if (data.alpha) {
+                        const oldWhite = displayValue(oldFinal + 1 - oldAlpha);
+                        b.before[i + 3] = oldWhite - b.target.white[offset + c];
+                        b.delta[i + 3] = displayValue(newFinal + 1 - newAlpha) - oldWhite;
+                    }
+                }
                 if (data.alpha) {
                     const blackTarget = displayTarget ? displayTarget[offset + c] : displayValue(target[offset + c]);
                     const whiteTarget = displayTarget ? displayTarget.white[offset + c] : displayValue(target[offset + c] + 1 - target.alpha[pixel]);
@@ -146,7 +216,32 @@
                 gain += (weights ? weights[pixel] : 1) * (displayTarget ? 1 / 3 : CHANNEL_WEIGHTS[c]) * (before * before - after * after);
             }
         }
+        if (boundaries) gain += boundaryGain(data, line, suffix, boundaries, serial);
         return gain;
+    }
+    function boundaryGain(data, line, suffix, b, serial) {
+        let gain = 0;
+        for (const p of line.pixels) for (let e = b.offsets[p]; e < b.offsets[p + 1]; e++) {
+            const q = b.neighbors[e], changed = b.stamp[q] === serial;
+            // Include edges with either endpoint changed, exactly once. The
+            // other endpoint may lie outside the proposed string altogether.
+            if (changed && q < p) continue;
+            const transmission = suffix ? suffix.transmission[q] : 1;
+            const alpha = data.alpha ? 1 - transmission * (1 - data.alpha[q]) : 1;
+            for (let c = 0; c < 3; c++) {
+                const i = p * 6 + c, j = q * 6 + c, off = q * 3 + c;
+                const final = changed ? 0 : transmission * data[off] + (suffix ? suffix.overlay[off] : 0);
+                const old = b.before[i] - (changed ? b.before[j] : displayValue(final) - b.target[off]);
+                const next = old + b.delta[i] - (changed ? b.delta[j] : 0);
+                gain += old * old - next * next;
+                if (data.alpha) {
+                    const oldWhite = b.before[i + 3] - (changed ? b.before[j + 3] : displayValue(final + 1 - alpha) - b.target.white[off]);
+                    const nextWhite = oldWhite + b.delta[i + 3] - (changed ? b.delta[j + 3] : 0);
+                    gain += oldWhite * oldWhite - nextWhite * nextWhite;
+                }
+            }
+        }
+        return b.strength * gain / (data.alpha ? 6 : 3);
     }
     function rasterizer(frame, width, height) {
         const sourcePins = makePins(frame);
@@ -217,7 +312,7 @@
         return line.length * (LENGTH_COST + BUILDUP_COST * (2 * (usage.get(line.key) || 0) + 1));
     }
     function objective(layers, context) {
-        let cost = pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights);
+        let cost = imageError(renderLayers(layers, context), context);
         const usage = new Map();
         for (const layer of layers) for (let i = 1; i < layer.sequence.length; i++) {
             const line = context.raster.line(layer.sequence[i - 1], layer.sequence[i]);
@@ -234,7 +329,7 @@
             if (separation < minDistance) continue;
             const line = context.raster.line(pin, to);
             if (line.length === 0) continue;
-            const gain = scoreLine(data, context.target, line, color, context.coverage, suffix, context.displayTarget, context.weights) - penalty(line, usage);
+            const gain = scoreLine(data, context.target, line, color, context.coverage, suffix, context.displayTarget, context.weights, context.boundaries) - penalty(line, usage);
             moves.push({to, line, gain});
         }
         moves.sort((a, b) => b.gain - a.gain || a.to - b.to);
@@ -283,7 +378,7 @@
             if (!choice.moves.length) break;
             if (choice.moves.length === 2) bundles++;
             for (const move of choice.moves) {
-                if (scoreLine(data, context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights) < -1e-10) temporaryHarm++;
+                if (scoreLine(data, context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights, context.boundaries) < -1e-10) temporaryHarm++;
                 applyLine(data, move.line, color, context.coverage);
                 usage.set(move.line.key, (usage.get(move.line.key) || 0) + 1);
                 sequence.push(move.to);
@@ -349,14 +444,11 @@
             }
             return tones[tones.length - 1].color;
         }
-        // Keep a robust dark endpoint rather than averaging the pupils/outlines
-        // into the dominant midtone. A single noisy black pixel cannot set it.
+        // A global brightness percentile can land on an antialiased edge of a
+        // small colored object. Never freeze that sample as a cluster center:
+        // let every hue settle before considering a true shadow endpoint.
         const dark = quantile(0.02), light = quantile(0.98);
-        const preserveDark = count > 1 && luminance(light) - luminance(dark) > 0.15;
-        // Thread seen through small light gaps must be darker than the
-        // desired shadow. Reserve 2% background contribution at this endpoint.
-        const shadowThread = background === null ? dark : dark.map((c, i) => toSrgb(clamp((toLinear(c) - 0.02 * background[i]) / 0.98, 0, 1)));
-        const centers = [preserveDark ? shadowThread : samples[0].color];
+        const centers = [samples[0].color];
         while (centers.length < count) {
             let candidate, score = 0;
             for (const sample of samples) {
@@ -375,7 +467,38 @@
                 for (let c = 0; c < 3; c++) sums[best][c] += sample.color[c] * sample.weight;
                 sums[best][3] += sample.weight;
             }
-            for (let i = preserveDark ? 1 : 0; i < centers.length; i++) if (sums[i][3]) centers[i] = sums[i].slice(0, 3).map(v => v / sums[i][3]);
+            for (let i = 0; i < centers.length; i++) if (sums[i][3]) centers[i] = sums[i].slice(0, 3).map(v => v / sums[i][3]);
+        }
+        // Choose a robust representative of each fitted group. Mixed fringe
+        // pixels must not pull a small object's thread toward its background.
+        const groups = centers.map(() => []);
+        for (const sample of samples) {
+            let best = 0;
+            for (let i = 1; i < centers.length; i++) if (distance(centers[i], sample.color) < distance(centers[best], sample.color)) best = i;
+            groups[best].push(sample);
+        }
+        for (let i = 0; i < centers.length; i++) {
+            if (!groups[i].length) continue;
+            const half = groups[i].reduce((sum, s) => sum + s.weight, 0) / 2;
+            centers[i] = centers[i].map((value, c) => {
+                let weight = 0;
+                for (const sample of groups[i].slice().sort((a, b) => a.color[c] - b.color[c])) {
+                    weight += sample.weight;
+                    if (weight >= half) return sample.color[c];
+                }
+                return value;
+            });
+        }
+        // Preserve a representative dark endpoint only for an actual shadow
+        // cluster, not a small midtone hue such as green leaves. The percentile
+        // guards against isolated black noise; it does not suppress an already
+        // discovered small dark cluster (e.g. the dove's eye and beak).
+        let darkest = 0;
+        for (let i = 1; i < centers.length; i++) if (luminance(centers[i]) < luminance(centers[darkest])) darkest = i;
+        if (count > 1 && luminance(dark) < 0.2 && luminance(centers[darkest]) < 0.25 &&
+                luminance(dark) < luminance(centers[darkest]) && luminance(light) - luminance(dark) > 0.15) {
+            centers[darkest] = background === null ? dark : dark.map((c, i) =>
+                toSrgb(clamp((toLinear(c) - 0.02 * background[i]) / 0.98, 0, 1)));
         }
         return [...new Set(centers.map(c => hex(c.map(toLinear))))].map(rgb);
     }
@@ -414,6 +537,7 @@
         if (target.alpha) displayTarget.white = Float64Array.from(target, (value, i) => toSrgb(clamp(value + 1 - target.alpha[Math.floor(i / 3)], 0, 1)));
         return {width, height, size, background, backgroundName, target, mask, coverage, displayTarget,
             weights: detailWeights(displayTarget, mask, width, height), raster: rasterizer(options, width, height),
+            boundaries: makeBoundaries(displayTarget, mask, width, height),
             palette: choosePalette(target, background, options.maxColors, mask)};
     }
     function allocateLayers(order, budget, context, progress) {
@@ -487,7 +611,7 @@
                 if (!choice.moves.length) break;
                 if (choice.moves.length === 2) layer.bundles++;
                 for (const move of choice.moves) {
-                    if (scoreLine(through[i], context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights) < -1e-10) layer.temporaryHarm++;
+                    if (scoreLine(through[i], context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights, context.boundaries) < -1e-10) layer.temporaryHarm++;
                     insert(i, move);
                 }
                 if (used < stop) {
@@ -504,10 +628,10 @@
         return values.flatMap((value, i) => permutations(values.filter((_, j) => i !== j)).map(rest => [value, ...rest]));
     }
     function reorder(layers, context) {
-        let best = layers, bestError = pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights);
+        let best = layers, bestError = imageError(renderLayers(layers, context), context);
         // Up to five spools: test all actual layer orders (at most 120).
         for (const order of permutations(layers)) {
-            const candidate = pixelError(renderLayers(order, context), context.target, context.displayTarget, context.weights);
+            const candidate = imageError(renderLayers(order, context), context);
             // Length and buildup are order-independent, so compare image error.
             if (candidate < bestError - 1e-10) { best = order; bestError = candidate; }
         }
@@ -575,6 +699,7 @@
             (completed, total) => progress({stage: 'Checking background-colored thread', completed, total}));
         layers = backgroundThread.added ? reorder(backgroundThread.layers, context).layers : layers;
         const usedColors = [...new Set(layers.map(l => l.color))];
+        const finalImage = renderLayers(layers, context);
         const saved = {
             version: 2, mode: 'color', shape: options.shape, width: options.width, height: options.height,
             horizontalPins: options.horizontalPins, verticalPins: options.verticalPins, pinCount: makePins(options).length,
@@ -582,10 +707,12 @@
             frameLongestCm: options.frameLongestCm, threadDiameterMm: options.threadDiameterMm,
             render: {model: context.background === null ? TRANSPARENT_MODEL : MODEL, width: context.width, height: context.height, coverage: context.coverage},
             layers: layers.map(l => ({color: usedColors.indexOf(l.color), sequence: l.sequence})),
-            stats: {errorMetric: context.background === null ? 'detail-weighted-srgb-two-backdrops-v1' : 'detail-weighted-srgb-v1',
+            stats: {errorMetric: context.background === null ? 'detail-boundary-srgb-two-backdrops-v1' : 'detail-boundary-srgb-v1',
                 backgroundThreadAdded: backgroundThread.added,
-                initialError: pixelError(canvas(context.size, context.background), context.target, context.displayTarget, context.weights),
-                finalError: pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights), refinedLayers,
+                initialError: imageError(canvas(context.size, context.background), context),
+                finalError: imageError(finalImage, context),
+                pixelError: pixelError(finalImage, context.target, context.displayTarget, context.weights),
+                boundaryError: boundaryError(finalImage, context.boundaries), refinedLayers,
                 temporaryHarmMoves: layers.reduce((n, l) => n + l.temporaryHarm, 0),
                 lookaheadBundles: layers.reduce((n, l) => n + l.bundles, 0)}
         };
@@ -638,5 +765,6 @@
     return {plan, render, steps, shoppingList, validatePlan, makePins,
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
-        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread};
+        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread,
+        makeBoundaries, boundaryError, imageError};
 });
