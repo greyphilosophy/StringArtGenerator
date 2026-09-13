@@ -75,9 +75,22 @@
         for (let i = 0; i < data.length; i++) data[i] = background[i % 3];
         return data;
     }
-    function pixelError(data, target) {
+    // Coverage still mixes in linear light, but judge the visible result in
+    // display RGB so shadow detail and red/blue differences are not discounted.
+    // Interpolate a transfer-function table in the inner candidate loop.
+    const DISPLAY_STEPS = 65536;
+    const DISPLAY_LUT = Float64Array.from({length: DISPLAY_STEPS + 1}, (_, i) => toSrgb(i / DISPLAY_STEPS));
+    function displayValue(value) {
+        const scaled = clamp(value, 0, 1) * DISPLAY_STEPS;
+        const index = Math.min(DISPLAY_STEPS - 1, Math.floor(scaled));
+        return DISPLAY_LUT[index] + (scaled - index) * (DISPLAY_LUT[index + 1] - DISPLAY_LUT[index]);
+    }
+    function pixelError(data, target, displayTarget, weights) {
         let error = 0;
-        for (let i = 0; i < data.length; i++) error += CHANNEL_WEIGHTS[i % 3] * (data[i] - target[i]) ** 2;
+        for (let i = 0; i < data.length; i++) {
+            error += (weights ? weights[Math.floor(i / 3)] : 1) * (displayTarget ? (displayValue(data[i]) - displayTarget[i]) ** 2 / 3 :
+                CHANNEL_WEIGHTS[i % 3] * (data[i] - target[i]) ** 2);
+        }
         return error;
     }
     // Partial pixel coverage models opaque, thin threads viewed from a distance.
@@ -88,7 +101,7 @@
             for (let c = 0; c < 3; c++) data[offset + c] += coverage * (color[c] - data[offset + c]);
         }
     }
-    function scoreLine(data, target, line, color, coverage, suffix) {
+    function scoreLine(data, target, line, color, coverage, suffix, displayTarget, weights) {
         let gain = 0;
         for (const pixel of line.pixels) {
             const offset = pixel * 3;
@@ -96,9 +109,11 @@
             for (let c = 0; c < 3; c++) {
                 const old = data[offset + c];
                 const overlay = suffix ? suffix.overlay[offset + c] : 0;
-                const before = transmission * old + overlay - target[offset + c];
-                const after = transmission * (old + coverage * (color[c] - old)) + overlay - target[offset + c];
-                gain += CHANNEL_WEIGHTS[c] * (before * before - after * after);
+                const oldFinal = transmission * old + overlay;
+                const newFinal = transmission * (old + coverage * (color[c] - old)) + overlay;
+                const before = displayTarget ? displayValue(oldFinal) - displayTarget[offset + c] : oldFinal - target[offset + c];
+                const after = displayTarget ? displayValue(newFinal) - displayTarget[offset + c] : newFinal - target[offset + c];
+                gain += (weights ? weights[pixel] : 1) * (displayTarget ? 1 / 3 : CHANNEL_WEIGHTS[c]) * (before * before - after * after);
             }
         }
         return gain;
@@ -172,7 +187,7 @@
         return line.length * (LENGTH_COST + BUILDUP_COST * (2 * (usage.get(line.key) || 0) + 1));
     }
     function objective(layers, context) {
-        let cost = pixelError(renderLayers(layers, context), context.target);
+        let cost = pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights);
         const usage = new Map();
         for (const layer of layers) for (let i = 1; i < layer.sequence.length; i++) {
             const line = context.raster.line(layer.sequence[i - 1], layer.sequence[i]);
@@ -189,7 +204,7 @@
             if (separation < minDistance) continue;
             const line = context.raster.line(pin, to);
             if (line.length === 0) continue;
-            const gain = scoreLine(data, context.target, line, color, context.coverage, suffix) - penalty(line, usage);
+            const gain = scoreLine(data, context.target, line, color, context.coverage, suffix, context.displayTarget, context.weights) - penalty(line, usage);
             moves.push({to, line, gain});
         }
         moves.sort((a, b) => b.gain - a.gain || a.to - b.to);
@@ -236,7 +251,7 @@
             if (!choice.moves.length) break;
             if (choice.moves.length === 2) bundles++;
             for (const move of choice.moves) {
-                if (scoreLine(data, context.target, move.line, color, context.coverage) < -1e-10) temporaryHarm++;
+                if (scoreLine(data, context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights) < -1e-10) temporaryHarm++;
                 applyLine(data, move.line, color, context.coverage);
                 usage.set(move.line.key, (usage.get(move.line.key) || 0) + 1);
                 sequence.push(move.to);
@@ -245,13 +260,41 @@
         }
         return {color: colorIndex, sequence, temporaryHarm, bundles};
     }
+    function perceived(color) { return color.map(toSrgb); }
+    function luminance(color) { return color.reduce((sum, c, i) => sum + CHANNEL_WEIGHTS[i] * c, 0); }
+    function detailWeights(displayTarget, mask, width, height) {
+        // Give local contrast (outlines, eyes, etc.) a bounded extra vote.
+        // Average weight stays one, keeping material costs on the same scale.
+        const weights = new Float64Array(mask.length);
+        const tone = new Float64Array(mask.length);
+        for (let p = 0; p < mask.length; p++) tone[p] = CHANNEL_WEIGHTS[0] * displayTarget[p * 3] +
+            CHANNEL_WEIGHTS[1] * displayTarget[p * 3 + 1] + CHANNEL_WEIGHTS[2] * displayTarget[p * 3 + 2];
+        const radius = Math.max(2, Math.round(Math.min(width, height) / 24));
+        let total = 0, active = 0;
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const p = y * width + x;
+            if (!mask[p]) continue;
+            let sum = 0, squared = 0, n = 0;
+            for (let yy = Math.max(0, y - radius); yy <= Math.min(height - 1, y + radius); yy++)
+                for (let xx = Math.max(0, x - radius); xx <= Math.min(width - 1, x + radius); xx++) {
+                    const q = yy * width + xx;
+                    if (!mask[q]) continue;
+                    sum += tone[q]; squared += tone[q] * tone[q]; n++;
+                }
+            const contrast = Math.sqrt(Math.max(0, squared / n - (sum / n) ** 2));
+            weights[p] = Math.min(5, 1 + 16 * contrast);
+            total += weights[p]; active++;
+        }
+        if (total) for (let p = 0; p < mask.length; p++) weights[p] *= active / total;
+        return weights;
+    }
     function choosePalette(target, background, count, mask) {
-        const bins = new Map();
+        const bins = new Map(), board = perceived(background);
         for (let p = 0; p < target.length / 3; p++) {
             if (!mask[p]) continue;
-            const color = Array.from(target.slice(p * 3, p * 3 + 3));
-            if (distance(color, background) < 0.0002) continue;
-            const key = color.map(x => Math.floor(toSrgb(x) * 15)).join(',');
+            const color = perceived(Array.from(target.slice(p * 3, p * 3 + 3)));
+            if (distance(color, board) < 0.0002) continue;
+            const key = color.map(x => Math.floor(x * 31)).join(',');
             if (!bins.has(key)) bins.set(key, {sum: [0, 0, 0], count: 0});
             const bin = bins.get(key); bin.count++;
             for (let c = 0; c < 3; c++) bin.sum[c] += color[c];
@@ -259,12 +302,28 @@
         const samples = [...bins.values()].map(b => ({color: b.sum.map(v => v / b.count), weight: b.count}));
         samples.sort((a, b) => b.weight - a.weight);
         if (!samples.length) return [];
-        const centers = [samples[0].color];
+        const tones = samples.slice().sort((a, b) => luminance(a.color) - luminance(b.color));
+        const mass = samples.reduce((sum, s) => sum + s.weight, 0);
+        function quantile(q) {
+            let accumulated = 0;
+            for (const sample of tones) {
+                accumulated += sample.weight;
+                if (accumulated >= q * mass) return sample.color;
+            }
+            return tones[tones.length - 1].color;
+        }
+        // Keep a robust dark endpoint rather than averaging the pupils/outlines
+        // into the dominant midtone. A single noisy black pixel cannot set it.
+        const dark = quantile(0.02), light = quantile(0.98);
+        const preserveDark = count > 1 && luminance(light) - luminance(dark) > 0.15;
+        // Thread seen through small light gaps must be darker than the
+        // desired shadow. Reserve 2% background contribution at this endpoint.
+        const shadowThread = dark.map((c, i) => toSrgb(clamp((toLinear(c) - 0.02 * background[i]) / 0.98, 0, 1)));
+        const centers = [preserveDark ? shadowThread : samples[0].color];
         while (centers.length < count) {
             let candidate, score = 0;
             for (const sample of samples) {
                 const d = Math.min(...centers.map(c => distance(c, sample.color)));
-                // sqrt frequency gives smaller, distinctive accents a chance.
                 const value = d * Math.sqrt(sample.weight);
                 if (d > 0.001 && value > score) { candidate = sample.color; score = value; }
             }
@@ -279,9 +338,9 @@
                 for (let c = 0; c < 3; c++) sums[best][c] += sample.color[c] * sample.weight;
                 sums[best][3] += sample.weight;
             }
-            for (let i = 0; i < centers.length; i++) if (sums[i][3]) centers[i] = sums[i].slice(0, 3).map(v => v / sums[i][3]);
+            for (let i = preserveDark ? 1 : 0; i < centers.length; i++) if (sums[i][3]) centers[i] = sums[i].slice(0, 3).map(v => v / sums[i][3]);
         }
-        return [...new Set(centers.map(hex))].map(rgb);
+        return [...new Set(centers.map(c => hex(c.map(toLinear))))].map(rgb);
     }
     function prepare(options) {
         validateFrame(options);
@@ -310,27 +369,96 @@
             for (let c = 0; c < 3; c++) target[p * 3 + c] = sum[c] / n;
         }
         const coverage = clamp(options.threadDiameterMm * (Math.max(width, height) - 1) / (options.frameLongestCm * 10), 0.001, 0.95);
-        return {width, height, size, background, target, mask, coverage, raster: rasterizer(options, width, height),
+        const displayTarget = Float64Array.from(target, toSrgb);
+        return {width, height, size, background, target, mask, coverage, displayTarget,
+            weights: detailWeights(displayTarget, mask, width, height), raster: rasterizer(options, width, height),
             palette: choosePalette(target, background, options.maxColors, mask)};
     }
-    function sequential(order, budget, context, progress) {
-        const layers = []; let used = 0;
-        for (let i = 0; i < order.length; i++) {
-            const layer = optimizeLayer(order[i], layers, [], Math.floor((budget - used) / (order.length - i)), context, progress);
-            used += layer.sequence.length - 1;
-            if (layer.sequence.length > 1) layers.push(layer);
+    function allocateLayers(order, budget, context, progress) {
+        const layers = order.map(color => ({color, sequence: [], temporaryHarm: 0, bundles: 0}));
+        // Same-color passes commute in the coverage model. Maintain the image
+        // through each layer so we can insert into ANY spool while scoring the
+        // actual final winding order, without breaking that spool's path.
+        const through = order.map(() => canvas(context.size, context.background));
+        const transmission = order.map(() => new Float64Array(context.size).fill(1));
+        const usage = new Map();
+        let used = 0;
+        function suffixFor(index) {
+            const t = new Float64Array(context.size).fill(1), overlay = new Float64Array(context.size * 3);
+            for (let l = index + 1; l < layers.length; l++)
+                for (let p = 0; p < context.size; p++) t[p] *= transmission[l][p];
+            const final = through[through.length - 1];
+            for (let p = 0; p < context.size; p++) for (let c = 0; c < 3; c++)
+                overlay[p * 3 + c] = final[p * 3 + c] - t[p] * through[index][p * 3 + c];
+            return {transmission: t, overlay};
         }
-        return layers;
+        function insert(index, move) {
+            const color = context.palette[layers[index].color];
+            for (const p of move.line.pixels) {
+                for (let c = 0; c < 3; c++) {
+                    let delta = context.coverage * (color[c] - through[index][p * 3 + c]);
+                    for (let l = index; l < layers.length; l++) {
+                        if (l > index) delta *= transmission[l][p];
+                        through[l][p * 3 + c] += delta;
+                    }
+                }
+                transmission[index][p] *= 1 - context.coverage;
+            }
+            usage.set(move.line.key, (usage.get(move.line.key) || 0) + 1);
+            layers[index].sequence.push(move.to);
+            used++;
+        }
+        while (used < budget && layers.length) {
+            let best = null;
+            for (let i = 0; i < layers.length; i++) {
+                const layer = layers[i], color = context.palette[layer.color], data = through[i], suffix = suffixFor(i);
+                let start = layer.sequence[layer.sequence.length - 1];
+                if (start === undefined) {
+                    let seedGain = -Infinity;
+                    for (let pin = 0; pin < context.raster.pins.length; pin += Math.max(1, Math.floor(context.raster.pins.length / 12))) {
+                        const seed = rankedMoves(pin, data, color, suffix, usage, context)[0];
+                        if (seed && seed.gain > seedGain) { seedGain = seed.gain; start = pin; }
+                    }
+                }
+                if (start === undefined) continue;
+                let choice = chooseMoves(start, data, color, suffix, usage, context, budget - used, false);
+                if (!choice.moves.length) choice = chooseMoves(start, data, color, suffix, usage, context, budget - used, true);
+                const rate = choice.moves.length ? choice.gain / choice.moves.length : 0;
+                if (rate > 0 && (!best || rate > best.rate)) best = {i, start, suffix, choice, rate};
+            }
+            if (!best) break;
+            const {i, suffix} = best, layer = layers[i], color = context.palette[layer.color];
+            if (!layer.sequence.length) layer.sequence.push(best.start);
+            // Reconsider allocation every 16 lines; keep short move bundles
+            // intact and retain material/buildup costs even under later cover.
+            const stop = Math.min(budget, used + 16);
+            let choice = best.choice;
+            while (used < stop && choice.moves.length) {
+                if (choice.moves.length > stop - used) choice = chooseMoves(layer.sequence[layer.sequence.length - 1], through[i], color, suffix, usage, context, stop - used, false);
+                if (!choice.moves.length) break;
+                if (choice.moves.length === 2) layer.bundles++;
+                for (const move of choice.moves) {
+                    if (scoreLine(through[i], context.target, move.line, color, context.coverage, null, context.displayTarget, context.weights) < -1e-10) layer.temporaryHarm++;
+                    insert(i, move);
+                }
+                if (used < stop) {
+                    choice = chooseMoves(layer.sequence[layer.sequence.length - 1], through[i], color, suffix, usage, context, stop - used, false);
+                    if (!choice.moves.length || used % 12 === 0) choice = chooseMoves(layer.sequence[layer.sequence.length - 1], through[i], color, suffix, usage, context, stop - used, true);
+                }
+            }
+            if (progress) progress(used, budget);
+        }
+        return layers.filter(layer => layer.sequence.length > 1);
     }
     function permutations(values) {
         if (!values.length) return [[]];
         return values.flatMap((value, i) => permutations(values.filter((_, j) => i !== j)).map(rest => [value, ...rest]));
     }
     function reorder(layers, context) {
-        let best = layers, bestError = pixelError(renderLayers(layers, context), context.target);
+        let best = layers, bestError = pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights);
         // Up to five spools: test all actual layer orders (at most 120).
         for (const order of permutations(layers)) {
-            const candidate = pixelError(renderLayers(order, context), context.target);
+            const candidate = pixelError(renderLayers(order, context), context.target, context.displayTarget, context.weights);
             // Length and buildup are order-independent, so compare image error.
             if (candidate < bestError - 1e-10) { best = order; bestError = candidate; }
         }
@@ -344,12 +472,12 @@
         let bestOrder = original, pilotScore = Infinity;
         for (let i = 0; i < orders.length; i++) {
             progress({stage: 'Comparing color orders', completed: i, total: orders.length});
-            const trial = sequential(orders[i], Math.min(100, options.maxLines), context);
+            const trial = allocateLayers(orders[i], Math.min(100, options.maxLines), context);
             const score = objective(trial, context);
             if (score < pilotScore) { bestOrder = orders[i]; pilotScore = score; }
         }
         progress({stage: 'Planning color paths', completed: 0, total: options.maxLines});
-        let layers = sequential(bestOrder, options.maxLines, context,
+        let layers = allocateLayers(bestOrder, options.maxLines, context,
             (used, total) => progress({stage: 'Planning a color path', completed: used, total}));
         progress({stage: 'Comparing finished layer orders', completed: 0, total: 1});
         layers = reorder(layers, context).layers;
@@ -374,8 +502,9 @@
             frameLongestCm: options.frameLongestCm, threadDiameterMm: options.threadDiameterMm,
             render: {model: MODEL, width: context.width, height: context.height, coverage: context.coverage},
             layers: layers.map(l => ({color: usedColors.indexOf(l.color), sequence: l.sequence})),
-            stats: {initialError: pixelError(canvas(context.size, context.background), context.target),
-                finalError: pixelError(renderLayers(layers, context), context.target), refinedLayers,
+            stats: {errorMetric: 'detail-weighted-srgb-v1',
+                initialError: pixelError(canvas(context.size, context.background), context.target, context.displayTarget, context.weights),
+                finalError: pixelError(renderLayers(layers, context), context.target, context.displayTarget, context.weights), refinedLayers,
                 temporaryHarmMoves: layers.reduce((n, l) => n + l.temporaryHarm, 0),
                 lookaheadBundles: layers.reduce((n, l) => n + l.bundles, 0)}
         };
@@ -427,5 +556,5 @@
     return {plan, render, steps, shoppingList, validatePlan, makePins,
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
-        rasterizer, chooseMoves, objective, prepare, reorder};
+        rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers};
 });

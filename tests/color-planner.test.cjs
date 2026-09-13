@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../color-planner.js');
+const tonalDetail = require('./fixtures/tonal-detail.cjs');
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-8, `${a} != ${b}`);
 const line = (...pixels) => ({pixels: Uint32Array.from(pixels), length: pixels.length, key: pixels.join(',')});
 const black = [0, 0, 0], white = [1, 1, 1];
@@ -42,6 +43,25 @@ test('later coverage discounts travel damage, but does not erase it', () => {
     close(finished, before - C.pixelError(data, target));
 });
 
+test('visible-error scoring matches a full render with weighted damage and later coverage', () => {
+    const srgb = x => x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055;
+    const data = Float64Array.of(0.02, 0.04, 0.01, 0.5, 0.2, 0.08);
+    const target = Float64Array.of(0.01, 0.02, 0.01, 0.7, 0.4, 0.1);
+    const visible = Float64Array.from(target, srgb), weights = Float64Array.of(2, 0.5);
+    const travel = line(0, 1), cover = line(0), later = [0.1, 0.2, 0.02];
+    const suffix = C.suffixTransform([{color: 0, sequence: [0, 1]}], [later], {line: () => cover}, 2, 0.7);
+    const before = data.slice(), after = data.slice();
+    C.applyLine(before, cover, later, 0.7);
+    C.applyLine(after, travel, black, 0.3);
+    C.applyLine(after, cover, later, 0.7);
+    const gain = C.scoreLine(data, target, travel, black, 0.3, suffix, visible, weights);
+    close(gain, C.pixelError(before, target, visible, weights) - C.pixelError(after, target, visible, weights));
+    const brute = pixels => pixels.reduce((sum, value, i) =>
+        sum + weights[Math.floor(i / 3)] * (srgb(value) - visible[i]) ** 2 / 3, 0);
+    assert.ok(Math.abs(gain - (brute(before) - brute(after))) < 1e-7);
+    assert.ok(gain < 0, 'visible damage still outweighs the improvement');
+});
+
 test('connected lookahead accepts useful temporary harm, never an unfinished harmful move', () => {
     const data = C.canvas(3, white), target = C.canvas(3, black);
     target.set(white, 0);
@@ -72,6 +92,63 @@ test('palette keeps five distinct image colors and ignores the board', () => {
     assert.equal(C.prepare(same).palette.length, 0);
 });
 
+test('palette retains substantial dark detail without following a lone black pixel', () => {
+    const {options} = tonalDetail();
+    const darkest = Math.min(...C.prepare(options).palette.map(color =>
+        Math.max(...C.hex(color).slice(1).match(/../g).map(c => parseInt(c, 16)))));
+    assert.ok(darkest <= 32, 'the available threads must be dark enough for the centers');
+    const target = C.canvas(100, C.rgb('#887744'));
+    target.set(black, 0);
+    for (let p = 80; p < 100; p++) target.set(C.rgb('#eeddaa'), p * 3);
+    const palette = C.choosePalette(target, white, 2, new Uint8Array(100).fill(1));
+    assert.ok(palette.every(color => C.hex(color) !== '#000000'), 'one outlier must not reserve a black spool');
+});
+
+test('colors share the full budget and stop when further moves lose net value', () => {
+    const edge = line(0);
+    const context = {size: 1, background: white, target: Float64Array.from(C.rgb('#303030')),
+        displayTarget: new Float64Array(3).fill(48 / 255), weights: Float64Array.of(1),
+        palette: [black, [1, 0, 0]], coverage: 0.1, raster: {pins: [0, 1, 2], line: () => edge}};
+    const capped = C.allocateLayers([0, 1], 10, context);
+    assert.equal(capped.length, 1);
+    assert.equal(capped[0].color, 0);
+    assert.equal(capped[0].sequence.length - 1, 10, 'useful black windings can use the entire budget');
+    const finished = C.allocateLayers([0, 1], 50, context);
+    const used = finished[0].sequence.length - 1;
+    assert.ok(used > 10 && used < 50);
+    assert.ok(C.objective(finished, context) < C.objective(capped, context));
+    const data = C.canvas(1, white);
+    for (let i = 0; i < used; i++) C.applyLine(data, edge, black, context.coverage);
+    const usage = new Map([[edge.key, used]]);
+    for (const color of context.palette) assert.equal(
+        C.chooseMoves(finished[0].sequence.at(-1), data, color, null, usage, context, 2, true).moves.length, 0);
+});
+
+test('tonal-detail image keeps dark centers distinct within the same winding budget', () => {
+    const {options, pupils, rings} = tonalDetail();
+    const plan = C.plan(options), {rgba} = C.render(plan);
+    const tone = pixels => pixels.reduce((sum, p) => sum +
+        0.2126 * rgba[p * 4] + 0.7152 * rgba[p * 4 + 1] + 0.0722 * rgba[p * 4 + 2], 0) / pixels.length;
+    assert.ok(tone(rings) - tone(pupils) > 28, 'centers must stay darker than their surrounding rings');
+    assert.ok(tone(pupils) < 65, 'dark detail must not wash out into the midtones');
+    let squared = 0;
+    for (let i = 0; i < rgba.length; i++) if (i % 4 !== 3) squared += (rgba[i] - options.rgba[i]) ** 2;
+    assert.ok(Math.sqrt(squared / (options.width * options.height * 3)) < 27, 'preserve the overall color image too');
+    assert.ok(C.steps(plan).length <= options.maxLines);
+    assert.equal(plan.stats.errorMetric, 'detail-weighted-srgb-v1');
+});
+
+test('existing version 2 paths still use the original linear-light coverage model', () => {
+    const saved = {version: 2, mode: 'color', shape: 'rectangle', width: 4, height: 4,
+        horizontalPins: 2, verticalPins: 2, pinCount: 8, background: '#ffffff', palette: ['#000000'],
+        frameLongestCm: 30, threadDiameterMm: 0.5,
+        render: {model: 'linear-coverage-v1', width: 4, height: 4, coverage: 0.5},
+        layers: [{color: 0, sequence: [0, 5]}]};
+    const {rgba} = C.render(saved);
+    assert.deepEqual(Array.from(rgba.slice(0, 4)), [188, 188, 188, 255]);
+    assert.deepEqual(Array.from(rgba.slice(4, 8)), [255, 255, 255, 255]);
+});
+
 test('rasterization is direction-independent, bounded and shares corner aliases', () => {
     const f = fixture();
     const forward = C.rasterizer(f, 32, 20), reverse = C.rasterizer(f, 32, 20);
@@ -98,7 +175,7 @@ for (const [name, w, h] of [['landscape', 32, 20], ['portrait', 20, 32], ['squar
         let rendered = C.canvas(context.size, context.background);
         for (const layer of plan.layers) for (let i = 1; i < layer.sequence.length; i++)
             C.applyLine(rendered, context.raster.line(layer.sequence[i - 1], layer.sequence[i]), C.rgb(plan.palette[layer.color]), plan.render.coverage);
-        close(C.pixelError(rendered, context.target), plan.stats.finalError);
+        close(C.pixelError(rendered, context.target, context.displayTarget, context.weights), plan.stats.finalError);
         for (const item of C.shoppingList(plan)) assert.ok(item.suggestedMetres > item.pathMetres);
         for (let l = 0; l < plan.layers.length; l++) {
             const steps = C.steps(plan).filter(s => s.layer === l);
