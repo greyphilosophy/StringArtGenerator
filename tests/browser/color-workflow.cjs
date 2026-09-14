@@ -52,11 +52,17 @@ test('upload → worker → shopping list → colored playback → fresh-session
     const {p, errors} = await page();
     try {
         assert.equal(await p.getByLabel('Color allocation', {exact: true}).inputValue(), 'adaptive');
+        assert.equal(await p.getByLabel('Number of Lines', {exact: true}).inputValue(), '1600');
+        assert.equal(await p.getByLabel('Refine color regions within the winding limit', {exact: true}).isChecked(), true);
         const plan = await generate(p, 300, 180, 60, 'perimeter');
         assert.equal(plan.version, 2);
         assert.equal(plan.background, 'transparent');
         assert.equal(plan.stats.allocation.method, 'region-perimeter-v1');
         assert.equal(plan.stats.edgeTravelEnabled, true);
+        assert.equal(plan.maxLines, 60);
+        assert.equal(plan.stats.feedback.enabled, true);
+        assert.ok(plan.stats.feedback.finalLines <= plan.maxLines);
+        assert.ok(plan.stats.feedback.finalError <= plan.stats.feedback.initialError);
         assert.equal(plan.stats.allocation.colors.reduce((sum, color) => sum + color.targetLines, 0), 60);
         assert.equal(await p.locator('#backgroundMode').inputValue(), 'transparent');
         assert.equal(await p.locator('#boardColor').isVisible(), false);
@@ -66,6 +72,7 @@ test('upload → worker → shopping list → colored playback → fresh-session
         assert.equal(plan.width / plan.height, 500 / 300);
         assert.deepEqual([plan.render.width, plan.render.height], [320, 192]);
         assert.match(await p.locator('#colorSummary').innerText(), /buy about/);
+        assert.match(await p.locator('#colorSummary').innerText(), /of the 60 maximum windings, including edge travel/);
         await p.getByRole('button', {name: 'Just Draw', exact: true}).click();
         await p.waitForFunction(() => { const n = JSON.parse(document.querySelector('#pinsOutput').value).layers.reduce((sum, l) => sum + l.sequence.length - 1, 0); return document.querySelector('#incrementalCurrentStep').textContent.startsWith('Line ' + n + '/' + n + ' '); });
         const generated = await p.locator('#canvasOutput2').evaluate(c => c.toDataURL());
@@ -107,8 +114,10 @@ test('portrait layout, cancelled work and invalid input recover cleanly', async 
         await p.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Could not plan colors:'));
         assert.equal(await p.locator('#fileInput').isEnabled(), true);
         await p.getByLabel('Maximum colors', {exact: true}).fill('5');
+        await p.getByLabel('Refine color regions within the winding limit', {exact: true}).uncheck();
         const plan = await generate(p, 180, 300, 25);
         assert.equal(plan.stats.allocation.method, 'shared-gain-v1');
+        assert.equal(plan.stats.feedback.enabled, false);
         assert.equal(plan.width / plan.height, 300 / 500);
         assert.deepEqual([plan.render.width, plan.render.height], [192, 320]);
         const dims = await p.locator('#canvasOutput2').evaluate(c => ({w: c.width, h: c.height, box: c.getBoundingClientRect().toJSON()}));

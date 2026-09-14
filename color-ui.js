@@ -39,6 +39,7 @@ function startColorGeneration() {
             background: selectedColorBackground(),
             maxColors: Number(document.getElementById('colorCount').value),
             colorAllocation: document.getElementById('colorAllocation').value,
+            regionFeedback: document.getElementById('regionFeedback').checked,
             maxLines: Number(numberOfLines.value),
             frameLongestCm: Number(document.getElementById('frameLongestCm').value),
             threadDiameterMm: Number(document.getElementById('threadDiameterMm').value)
@@ -116,6 +117,11 @@ function showColorSummary() {
     frame.textContent = (colorPlan.background === 'transparent' ? 'Open frame · Transparent background' : 'Solid board ' + colorPlan.background) +
         ' · Longest side / diameter ' + colorPlan.frameLongestCm + ' cm · Thread diameter ' + colorPlan.threadDiameterMm + ' mm';
     summary.appendChild(frame);
+    if (colorPlan.maxLines !== undefined) {
+        const budget = document.createElement('p');
+        budget.textContent = 'This plan uses ' + colorSteps.length + ' of the ' + colorPlan.maxLines + ' maximum windings, including edge travel.';
+        summary.appendChild(budget);
+    }
     const list = document.createElement('ol');
     for (const item of ColorPlanner.shoppingList(colorPlan)) {
         const li = document.createElement('li');
