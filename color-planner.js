@@ -6,6 +6,7 @@
     'use strict';
     const MODEL = 'linear-coverage-v1';
     const TRANSPARENT_MODEL = 'linear-coverage-alpha-v1';
+    const MAX_WORKING_DIMENSION = 320;
     const CHANNEL_WEIGHTS = [0.2126, 0.7152, 0.0722];
     const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
     const toLinear = x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
@@ -52,7 +53,7 @@
         if (!validBackground(plan.background) || !Array.isArray(plan.palette) || plan.palette.length > 5 || !plan.palette.every(validHex) ||
             !render || render.model !== (plan.background === 'transparent' ? TRANSPARENT_MODEL : MODEL) ||
             !Number.isInteger(render.width) || !Number.isInteger(render.height) ||
-            render.width < 2 || render.height < 2 || render.width > 200 || render.height > 200 ||
+            render.width < 2 || render.height < 2 || render.width > MAX_WORKING_DIMENSION || render.height > MAX_WORKING_DIMENSION ||
             Math.abs(render.width / render.height - plan.width / plan.height) > 2 / render.height ||
             !Number.isFinite(render.coverage) || render.coverage <= 0 || render.coverage > 0.95 ||
             !Number.isFinite(plan.frameLongestCm) || plan.frameLongestCm <= 0 || plan.frameLongestCm > 1000 ||
@@ -510,7 +511,7 @@
             !Number.isInteger(options.maxLines) || options.maxLines < 1 || options.maxLines > 10000 ||
             !Number.isFinite(options.frameLongestCm) || options.frameLongestCm <= 0 || options.frameLongestCm > 1000 ||
             !Number.isFinite(options.threadDiameterMm) || options.threadDiameterMm <= 0 || options.threadDiameterMm > 5) throw new Error('Invalid color generation settings.');
-        const scale = Math.min(1, 160 / Math.max(options.width, options.height));
+        const scale = Math.min(1, MAX_WORKING_DIMENSION / Math.max(options.width, options.height));
         const width = Math.max(2, Math.round(options.width * scale)), height = Math.max(2, Math.round(options.height * scale));
         const size = width * height, background = backgroundName === 'transparent' ? null : rgb(backgroundName);
         const target = canvas(size, background), mask = new Uint8Array(size);
