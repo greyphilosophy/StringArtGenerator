@@ -211,6 +211,21 @@ test('existing version 2 paths still use the original linear-light coverage mode
     assert.deepEqual(Array.from(rgba.slice(4, 8)), [255, 255, 255, 255]);
 });
 
+test('320-pixel color plans survive saved replay and older plans retain their stored resolution', () => {
+    const options = {...fixture(500, 375), maxColors: 2, maxLines: 12};
+    const plan = C.plan(options), rendered = C.render(plan);
+    assert.deepEqual([plan.render.width, plan.render.height], [320, 240]);
+    assert.deepEqual([rendered.width, rendered.height, rendered.rgba.length], [320, 240, 320 * 240 * 4]);
+    assert.ok(C.steps(plan).length > 0 && C.steps(plan).length <= options.maxLines);
+    assert.deepEqual(rendered, C.render(JSON.parse(JSON.stringify(plan))));
+    const older = structuredClone(plan);
+    older.render = {...older.render, width: 160, height: 120, coverage: 0.1};
+    const oldRender = C.render(older);
+    assert.deepEqual([oldRender.width, oldRender.height], [160, 120], 'replay uses the saved size, not the new generation default');
+    const oversized = structuredClone(plan); oversized.render.width = 321;
+    assert.throws(() => C.validatePlan(oversized), 'working images remain bounded');
+});
+
 test('rasterization is direction-independent, bounded and shares corner aliases', () => {
     const f = fixture();
     const forward = C.rasterizer(f, 32, 20), reverse = C.rasterizer(f, 32, 20);

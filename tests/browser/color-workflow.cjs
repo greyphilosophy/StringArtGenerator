@@ -59,6 +59,7 @@ test('upload → worker → shopping list → colored playback → fresh-session
         assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 === 3 && v < 255)), true);
         assert.ok(plan.palette.length > 0 && plan.palette.length <= 5);
         assert.equal(plan.width / plan.height, 500 / 300);
+        assert.deepEqual([plan.render.width, plan.render.height], [320, 192]);
         assert.match(await p.locator('#colorSummary').innerText(), /buy about/);
         await p.getByRole('button', {name: 'Just Draw', exact: true}).click();
         await p.waitForFunction(() => { const n = JSON.parse(document.querySelector('#pinsOutput').value).layers.reduce((sum, l) => sum + l.sequence.length - 1, 0); return document.querySelector('#incrementalCurrentStep').textContent.startsWith('Line ' + n + '/' + n + ' '); });
@@ -96,6 +97,7 @@ test('portrait layout, cancelled work and invalid input recover cleanly', async 
         await p.getByLabel('Maximum colors', {exact: true}).fill('5');
         const plan = await generate(p, 180, 300, 25);
         assert.equal(plan.width / plan.height, 300 / 500);
+        assert.deepEqual([plan.render.width, plan.render.height], [192, 320]);
         const dims = await p.locator('#canvasOutput2').evaluate(c => ({w: c.width, h: c.height, box: c.getBoundingClientRect().toJSON()}));
         assert.equal(dims.w / dims.h, 0.6);
         assert.ok(Math.abs(dims.box.width / dims.box.height - 0.6) < 0.01);
