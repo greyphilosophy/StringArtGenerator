@@ -72,6 +72,8 @@
             }
         }
         if (lines > 10000) throw new Error('Color plans support at most 10000 lines.');
+        if (plan.maxLines !== undefined && (!Number.isInteger(plan.maxLines) || plan.maxLines < 1 || plan.maxLines > 10000 || lines > plan.maxLines))
+            throw new Error('The winding sequence exceeds its saved line budget.');
         return plan;
     }
     function canvas(size, background) {
@@ -151,14 +153,15 @@
         let error = 0;
         for (let e = 0; e < from.length; e++) {
             const p = from[e], q = to[e];
+            const weight = boundaries.regionWeights ? (boundaries.regionWeights[p] + boundaries.regionWeights[q]) / 2 : 1;
             for (let c = 0; c < 3; c++) {
                 const a = p * 3 + c, b = q * 3 + c;
                 const difference = displayValue(data[a]) - displayValue(data[b]) - (target[a] - target[b]);
-                error += difference * difference;
+                error += weight * difference * difference;
                 if (data.alpha) {
                     const whiteDifference = displayValue(data[a] + 1 - data.alpha[p]) - displayValue(data[b] + 1 - data.alpha[q]) -
                         (target.white[a] - target.white[b]);
-                    error += whiteDifference * whiteDifference;
+                    error += weight * whiteDifference * whiteDifference;
                 }
             }
         }
@@ -227,6 +230,7 @@
             // Include edges with either endpoint changed, exactly once. The
             // other endpoint may lie outside the proposed string altogether.
             if (changed && q < p) continue;
+            const weight = b.regionWeights ? (b.regionWeights[p] + b.regionWeights[q]) / 2 : 1;
             const transmission = suffix ? suffix.transmission[q] : 1;
             const alpha = data.alpha ? 1 - transmission * (1 - data.alpha[q]) : 1;
             for (let c = 0; c < 3; c++) {
@@ -234,15 +238,23 @@
                 const final = changed ? 0 : transmission * data[off] + (suffix ? suffix.overlay[off] : 0);
                 const old = b.before[i] - (changed ? b.before[j] : displayValue(final) - b.target[off]);
                 const next = old + b.delta[i] - (changed ? b.delta[j] : 0);
-                gain += old * old - next * next;
+                gain += weight * (old * old - next * next);
                 if (data.alpha) {
                     const oldWhite = b.before[i + 3] - (changed ? b.before[j + 3] : displayValue(final + 1 - alpha) - b.target.white[off]);
                     const nextWhite = oldWhite + b.delta[i + 3] - (changed ? b.delta[j + 3] : 0);
-                    gain += oldWhite * oldWhite - nextWhite * nextWhite;
+                    gain += weight * (oldWhite * oldWhite - nextWhite * nextWhite);
                 }
             }
         }
         return b.strength * gain / (data.alpha ? 6 : 3);
+    }
+    function segmentSide(frame, a, b) {
+        if (frame.shape !== 'rectangle' || (a[0] === b[0] && a[1] === b[1])) return null;
+        if (a[1] === b[1] && a[1] === frame.height - 1) return 'bottom';
+        if (a[0] === b[0] && a[0] === frame.width - 1) return 'right';
+        if (a[1] === b[1] && a[1] === 0) return 'top';
+        if (a[0] === b[0] && a[0] === 0) return 'left';
+        return null;
     }
     function rasterizer(frame, width, height) {
         const sourcePins = makePins(frame);
@@ -253,6 +265,7 @@
         const cache = new Map();
         return {
             pins,
+            side(a, b) { return segmentSide(frame, sourcePins[a], sourcePins[b]); },
             line(a, b) {
                 const key = [aliases[a], aliases[b]].sort().join(':');
                 if (cache.has(key)) return cache.get(key);
@@ -271,7 +284,8 @@
                     if (e2 <= dx) { err += dx; y += sy; }
                 }
                 const length = Math.hypot(pins[a][0] - x1, pins[a][1] - y1);
-                const line = {key, pixels: Uint32Array.from(pixels), length};
+                const line = {key, pixels: Uint32Array.from(pixels), length,
+                    edge: segmentSide(frame, sourcePins[a], sourcePins[b])};
                 if (cache.size >= 12000) cache.delete(cache.keys().next().value);
                 cache.set(key, line);
                 return line;
@@ -327,7 +341,8 @@
         const minDistance = Math.min(20, Math.max(1, Math.floor(n / 12)));
         for (let to = 0; to < n; to++) {
             const separation = Math.min(Math.abs(to - pin), n - Math.abs(to - pin));
-            if (separation < minDistance) continue;
+            const edgeTravel = context.edgeTravel && context.raster.side && context.raster.side(pin, to);
+            if (separation < minDistance && !edgeTravel) continue;
             const line = context.raster.line(pin, to);
             if (line.length === 0) continue;
             const gain = scoreLine(data, context.target, line, color, context.coverage, suffix, context.displayTarget, context.weights, context.boundaries) - penalty(line, usage);
@@ -342,7 +357,20 @@
         const moves = rankedMoves(pin, data, color, suffix, usage, context);
         let best = moves.length && moves[0].gain > 0 ? {moves: [moves[0]], gain: moves[0].gain} : {moves: [], gain: 0};
         if (budget < 2 || !lookahead) return best;
-        for (const first of moves.slice(0, 4)) {
+        const firstMoves = moves.slice(0, 4);
+        if (context.edgeTravel) {
+            // Short frame transits can have little immediate image benefit, so
+            // reserve beam places for them. They must connect pins on ONE side;
+            // crossing a corner is never treated as edge travel. Keep the search
+            // bounded: four ordinary candidates plus four nearest edge routes.
+            const routes = new Set(firstMoves.map(move => move.line.key));
+            for (const move of moves.filter(move => move.line.edge).sort((a, b) => a.line.length - b.line.length || a.to - b.to)) {
+                if (routes.has(move.line.key)) continue;
+                firstMoves.push(move); routes.add(move.line.key);
+                if (firstMoves.length >= 8) break;
+            }
+        }
+        for (const first of firstMoves) {
             const old = new Float64Array(first.line.pixels.length * 3);
             const oldAlpha = data.alpha ? Float64Array.from(first.line.pixels, p => data.alpha[p]) : null;
             let j = 0;
@@ -359,18 +387,19 @@
         }
         return best;
     }
-    function optimizeLayer(colorIndex, prefix, suffixLayers, budget, context, progress) {
-        const data = renderLayers(prefix, context);
+    function optimizeLayer(colorIndex, prefix, suffixLayers, budget, context, progress, fixed) {
+        const retained = fixed && fixed.sequence.length > 1 ? [fixed] : [];
+        const data = renderLayers(prefix.concat(retained), context);
         const suffix = suffixLayers.length ? suffixTransform(suffixLayers, context.palette, context.raster, context.size, context.coverage) : null;
-        const usage = usageFor(prefix.concat(suffixLayers), context.raster), color = context.palette[colorIndex];
+        const usage = usageFor(prefix.concat(retained, suffixLayers), context.raster), color = context.palette[colorIndex];
         let start = 0, bestSeed = -Infinity;
         // Each new spool can be tied on at any nail; sample starting nails.
-        for (let pin = 0; pin < context.raster.pins.length; pin += Math.max(1, Math.floor(context.raster.pins.length / 12))) {
+        for (let pin = 0; !retained.length && pin < context.raster.pins.length; pin += Math.max(1, Math.floor(context.raster.pins.length / 12))) {
             const seed = rankedMoves(pin, data, color, suffix, usage, context)[0];
             if (seed && seed.gain > bestSeed) { bestSeed = seed.gain; start = pin; }
         }
-        const sequence = [start];
-        let temporaryHarm = 0, bundles = 0;
+        const sequence = retained.length ? fixed.sequence.slice() : [start];
+        let temporaryHarm = retained.length ? fixed.temporaryHarm || 0 : 0, bundles = retained.length ? fixed.bundles || 0 : 0;
         while (sequence.length - 1 < budget) {
             const used = sequence.length - 1;
             let choice = chooseMoves(sequence[used], data, color, suffix, usage, context, budget - used, false);
@@ -503,10 +532,77 @@
         }
         return [...new Set(centers.map(c => hex(c.map(toLinear))))].map(rgb);
     }
+    function regionAllocation(target, palette, background, mask, width, height) {
+        // This small posterized map only measures regions. Path scoring keeps
+        // the original, unquantized target and its signed boundary contrasts.
+        const colors = palette.map(perceived), count = palette.length, size = width * height;
+        if (background && !palette.some(color => hex(color) === hex(background))) colors.push(perceived(background));
+        const labels = new Int16Array(size).fill(-1), visible = new Float64Array(size * 3);
+        const nearest = new Float64Array(size), areas = new Array(count).fill(0);
+        for (let p = 0; p < size; p++) {
+            const alpha = target.alpha ? target.alpha[p] : 1;
+            if (!mask[p] || alpha <= 0 || !colors.length) continue;
+            const color = Array.from(target.slice(p * 3, p * 3 + 3), c => toSrgb(clamp(c / alpha, 0, 1)));
+            visible.set(color, p * 3);
+            let best = 0, d = distance(color, colors[0]);
+            for (let i = 1; i < colors.length; i++) {
+                const candidate = distance(color, colors[i]);
+                if (candidate < d) { best = i; d = candidate; }
+            }
+            labels[p] = best; nearest[p] = d;
+        }
+        // One conservative cleanup pass: only ambiguous mixed fringe pixels
+        // can follow a strong local majority. A close palette match survives
+        // even when it is a one-pixel eye or a one-pixel-wide stem.
+        const cleaned = labels.slice();
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const p = y * width + x;
+            if (labels[p] < 0 || nearest[p] <= 0.0002) continue;
+            const votes = new Uint8Array(colors.length);
+            for (let yy = Math.max(0, y - 1); yy <= Math.min(height - 1, y + 1); yy++)
+                for (let xx = Math.max(0, x - 1); xx <= Math.min(width - 1, x + 1); xx++) {
+                    const q = yy * width + xx;
+                    if (q !== p && labels[q] >= 0) votes[labels[q]]++;
+                }
+            const majority = votes.indexOf(Math.max(...votes));
+            if (votes[majority] >= 5 && majority !== labels[p] &&
+                    distance(Array.from(visible.slice(p * 3, p * 3 + 3)), colors[majority]) <= nearest[p] * 1.5) cleaned[p] = majority;
+        }
+        const perimeters = new Array(count).fill(0);
+        function edge(p, q) {
+            // Ignore the frame perimeter; shared internal boundaries count
+            // for both colors. Empty transparent space has no thread budget.
+            if (!mask[p] || !mask[q] || cleaned[p] === cleaned[q]) return;
+            for (const at of [p, q]) if (cleaned[at] >= 0 && cleaned[at] < count)
+                perimeters[cleaned[at]] += target.alpha ? target.alpha[at] : 1;
+        }
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const p = y * width + x, color = cleaned[p];
+            if (color >= 0 && color < count) areas[color] += target.alpha ? target.alpha[p] : 1;
+            if (x + 1 < width) edge(p, p + 1);
+            if (y + 1 < height) edge(p, p + width);
+        }
+        // A uniform image has no internal boundaries but can still need thread.
+        return {perimeters, shares: perimeters.some(value => value > 0) ? perimeters : areas, labels: cleaned, areas};
+    }
+    function apportionLines(shares, budget) {
+        const total = shares.reduce((sum, value) => sum + value, 0);
+        if (!total) return shares.map(() => 0);
+        const exact = shares.map(value => value * budget / total), lines = exact.map(Math.floor);
+        const remainder = exact.map((value, color) => ({color, fraction: value - lines[color]}))
+            .sort((a, b) => b.fraction - a.fraction || a.color - b.color);
+        const left = budget - lines.reduce((sum, value) => sum + value, 0);
+        for (let i = 0; i < left; i++) lines[remainder[i].color]++;
+        return lines;
+    }
     function prepare(options) {
         validateFrame(options);
         const backgroundName = options.background === undefined ? 'transparent' : options.background;
+        const colorAllocation = options.colorAllocation === undefined ? 'adaptive' : options.colorAllocation;
         if (!options.rgba || options.rgba.length !== options.width * options.height * 4 || !validBackground(backgroundName) ||
+            !['adaptive', 'perimeter'].includes(colorAllocation) ||
+            (options.edgeTravel !== undefined && typeof options.edgeTravel !== 'boolean') ||
+            (options.regionFeedback !== undefined && typeof options.regionFeedback !== 'boolean') ||
             !Number.isInteger(options.maxColors) || options.maxColors < 1 || options.maxColors > 5 ||
             !Number.isInteger(options.maxLines) || options.maxLines < 1 || options.maxLines > 10000 ||
             !Number.isFinite(options.frameLongestCm) || options.frameLongestCm <= 0 || options.frameLongestCm > 1000 ||
@@ -536,13 +632,16 @@
         const coverage = clamp(options.threadDiameterMm * (Math.max(width, height) - 1) / (options.frameLongestCm * 10), 0.001, 0.95);
         const displayTarget = Float64Array.from(target, toSrgb);
         if (target.alpha) displayTarget.white = Float64Array.from(target, (value, i) => toSrgb(clamp(value + 1 - target.alpha[Math.floor(i / 3)], 0, 1)));
+        const palette = choosePalette(target, background, options.maxColors, mask);
         return {width, height, size, background, backgroundName, target, mask, coverage, displayTarget,
             weights: detailWeights(displayTarget, mask, width, height), raster: rasterizer(options, width, height),
             boundaries: makeBoundaries(displayTarget, mask, width, height),
-            palette: choosePalette(target, background, options.maxColors, mask)};
+            palette, edgeTravel: options.shape === 'rectangle' && options.edgeTravel !== false, regionFeedback: options.regionFeedback !== false,
+            allocation: colorAllocation === 'perimeter' ? regionAllocation(target, palette, background, mask, width, height) : null};
     }
     function allocateLayers(order, budget, context, progress) {
         const layers = order.map(color => ({color, sequence: [], temporaryHarm: 0, bundles: 0}));
+        const targets = context.allocation ? apportionLines(context.allocation.shares, budget) : null;
         // Same-color passes commute in the coverage model. Maintain the image
         // through each layer so we can insert into ANY spool while scoring the
         // actual final winding order, without breaking that spool's path.
@@ -582,10 +681,13 @@
             layers[index].sequence.push(move.to);
             used++;
         }
-        while (used < budget && layers.length) {
+        function nextBatch(reserved) {
             let best = null;
             for (let i = 0; i < layers.length; i++) {
-                const layer = layers[i], color = context.palette[layer.color], data = through[i], suffix = suffixFor(i);
+                const layer = layers[i], spent = Math.max(0, layer.sequence.length - 1);
+                const available = Math.min(budget - used, reserved ? Math.max(0, targets[layer.color] - spent) : budget);
+                if (!available) continue;
+                const color = context.palette[layer.color], data = through[i], suffix = suffixFor(i);
                 let start = layer.sequence[layer.sequence.length - 1];
                 if (start === undefined) {
                     let seedGain = -Infinity;
@@ -595,17 +697,24 @@
                     }
                 }
                 if (start === undefined) continue;
-                let choice = chooseMoves(start, data, color, suffix, usage, context, budget - used, false);
-                if (!choice.moves.length) choice = chooseMoves(start, data, color, suffix, usage, context, budget - used, true);
+                let choice = chooseMoves(start, data, color, suffix, usage, context, available, false);
+                if (!choice.moves.length) choice = chooseMoves(start, data, color, suffix, usage, context, available, true);
                 const rate = choice.moves.length ? choice.gain / choice.moves.length : 0;
-                if (rate > 0 && (!best || rate > best.rate)) best = {i, start, suffix, choice, rate};
+                if (rate > 0 && (!best || rate > best.rate)) best = {i, start, suffix, choice, rate, available};
             }
+            return best;
+        }
+        while (used < budget && layers.length) {
+            // Honor useful perimeter reservations first. If all remaining
+            // reservations are stalled, any spool can use the spare windings.
+            // Recheck on the next batch: later coverage can revive a path.
+            const best = (targets && nextBatch(true)) || nextBatch(false);
             if (!best) break;
             const {i, suffix} = best, layer = layers[i], color = context.palette[layer.color];
             if (!layer.sequence.length) layer.sequence.push(best.start);
             // Reconsider allocation every 16 lines; keep short move bundles
             // intact and retain material/buildup costs even under later cover.
-            const stop = Math.min(budget, used + 16);
+            const stop = used + Math.min(16, best.available);
             let choice = best.choice;
             while (used < stop && choice.moves.length) {
                 if (choice.moves.length > stop - used) choice = chooseMoves(layer.sequence[layer.sequence.length - 1], through[i], color, suffix, usage, context, stop - used, false);
@@ -666,6 +775,178 @@
         if (best === layers && appended) context.palette.pop();
         return {layers: best, added: best !== layers};
     }
+    function feedbackContext(context) {
+        const regions = regionAllocation(context.target, context.palette, context.background, context.mask, context.width, context.height);
+        const mass = regions.areas.reduce((sum, area) => sum + area, 0);
+        const colors = regions.areas.filter(area => area > 0).length;
+        const factors = new Float64Array(context.size).fill(1), weights = new Float64Array(context.size);
+        let originalWeight = 0, weighted = 0;
+        for (let p = 0; p < context.size; p++) {
+            const color = regions.labels[p], area = regions.areas[color] || 0;
+            // Give each visible color a bounded regional vote in addition to
+            // ordinary image error. Never let an arbitrarily tiny patch acquire
+            // an arbitrarily large weight. These weights stay FIXED throughout
+            // feedback, so every accepted change improves the same objective.
+            if (area) factors[p] += Math.min(15, mass / (colors * area));
+            const original = context.weights ? context.weights[p] : context.mask[p];
+            weights[p] = original * factors[p];
+            originalWeight += original; weighted += weights[p];
+        }
+        const normalization = weighted ? originalWeight / weighted : 1;
+        for (let p = 0; p < context.size; p++) { weights[p] *= normalization; factors[p] *= normalization; }
+        const boundaries = context.boundaries ? {...context.boundaries, regionWeights: factors,
+            // Candidate stamps/counters cannot be shared with the unweighted
+            // context: it is still used by the whole-image quality guard.
+            stamp: new Uint32Array(context.size), serial: 0,
+            before: new Float64Array(context.size * 6), delta: new Float64Array(context.size * 6)} : null;
+        return {...context, weights, boundaries, regions};
+    }
+    function regionErrors(data, context, regions) {
+        const errors = regions.areas.map(area => ({area, colorError: 0, boundaryError: 0, boundaryMass: 0}));
+        const {target, displayTarget, boundaries: b} = context;
+        for (let p = 0; p < context.size; p++) {
+            const region = errors[regions.labels[p]];
+            if (!region) continue;
+            const alpha = target.alpha ? target.alpha[p] : 1;
+            for (let c = 0; c < 3; c++) {
+                const i = p * 3 + c;
+                region.colorError += alpha * (data.alpha ? transparentError(data[i], data.alpha[p], displayTarget[i], displayTarget.white[i]) :
+                    (displayValue(data[i]) - displayTarget[i]) ** 2) / 3;
+            }
+        }
+        if (b) for (let e = 0; e < b.from.length; e++) {
+            const p = b.from[e], q = b.to[e];
+            let error = 0;
+            for (let c = 0; c < 3; c++) {
+                const a = p * 3 + c, z = q * 3 + c;
+                error += (displayValue(data[a]) - displayValue(data[z]) - (displayTarget[a] - displayTarget[z])) ** 2;
+                if (data.alpha) error += (displayValue(data[a] + 1 - data.alpha[p]) - displayValue(data[z] + 1 - data.alpha[q]) -
+                    (displayTarget.white[a] - displayTarget.white[z])) ** 2;
+            }
+            error /= data.alpha ? 6 : 3;
+            for (const at of [p, q]) {
+                const region = errors[regions.labels[at]], alpha = target.alpha ? target.alpha[at] : 1;
+                if (region) { region.boundaryError += error * alpha; region.boundaryMass += alpha; }
+            }
+        }
+        const mass = regions.areas.reduce((sum, area) => sum + area, 0);
+        return errors.map((error, color) => {
+            const meanColorError = error.area ? error.colorError / error.area : 0;
+            const meanBoundaryError = error.boundaryMass ? error.boundaryError / error.boundaryMass : 0;
+            return {color, area: error.area, meanColorError, meanBoundaryError,
+                priority: (meanColorError + 2 * meanBoundaryError) * Math.min(1, error.area / Math.max(1, mass * 0.005))};
+        });
+    }
+    const windingCount = layers => layers.reduce((sum, layer) => sum + Math.max(0, layer.sequence.length - 1), 0);
+    function trimLayer(layers, index, count) {
+        const trial = layers.slice(), layer = layers[index];
+        const keep = Math.max(1, layer.sequence.length - count);
+        if (keep === 1) trial.splice(index, 1);
+        else trial[index] = {...layer, sequence: layer.sequence.slice(0, keep)};
+        return trial;
+    }
+    function rebalanceRegions(initial, context, maxColors, maxLines, progress = () => {}) {
+        const disabled = {layers: initial, stats: {enabled: false}};
+        if (!context.regionFeedback) return disabled;
+        const balanced = feedbackContext(context), {regions} = balanced;
+        const stats = {enabled: true, method: 'bounded-region-feedback-v1', maxLines, attempts: 0,
+            rounds: 0, stopReason: 'not-needed', history: []};
+        const batch = Math.min(16, Math.max(1, Math.floor(maxLines / 20)));
+        let layers = initial, cost = objective(layers, balanced);
+        const initialImage = renderLayers(layers, context);
+        const initialGlobal = imageError(initialImage, context);
+        const initialPixel = pixelError(initialImage, context.target, context.displayTarget, context.weights);
+        stats.initialError = cost;
+        stats.initialRegions = regionErrors(initialImage, context, regions);
+        function candidate(trial) {
+            stats.attempts++;
+            if (windingCount(trial) > maxLines || new Set(trial.map(layer => layer.color)).size > maxColors) return Infinity;
+            const score = objective(trial, balanced);
+            if (score >= cost - 1e-10) return Infinity;
+            const data = renderLayers(trial, context);
+            // Protect the rest of the picture while improving small regions.
+            // Both guards refer to the ORIGINAL finished plan, so repeated
+            // accepted steps cannot accumulate an unlimited global regression.
+            if (imageError(data, context) > initialGlobal * 1.03 + 1e-10 ||
+                pixelError(data, context.target, context.displayTarget, context.weights) > initialPixel * 1.03 + 1e-10) return Infinity;
+            return score;
+        }
+        function accept(trial, next, details) {
+            stats.history.push({...details, before: cost, after: next,
+                linesBefore: windingCount(layers), linesAfter: windingCount(trial)});
+            layers = trial; cost = next;
+        }
+        if (regions.areas.filter(area => area > 0).length > 1 && maxLines > 1) {
+            // First give the existing allocations a chance to follow the newly
+            // weighted regions. A reservation is not useful if its paths miss.
+            const colors = layers.map(layer => layer.color);
+            for (let n = 0; n < colors.length; n++) {
+                progress({stage: 'Improving color regions', completed: n, total: colors.length});
+                const index = layers.findIndex(layer => layer.color === colors[n]);
+                if (index < 0) continue;
+                const replacement = optimizeLayer(colors[n], layers.slice(0, index), layers.slice(index + 1),
+                    layers[index].sequence.length - 1, balanced);
+                const trial = layers.slice(); trial[index] = replacement;
+                const valid = trial.filter(layer => layer.sequence.length > 1), next = candidate(valid);
+                if (Number.isFinite(next)) accept(valid, next, {kind: 'refine', color: colors[n]});
+            }
+            // At most 12 rounds and four donor/receiver trials per round. Tail
+            // removal preserves a donor's path. Rebuild only the receiver's last
+            // 16 moves plus its new allowance to bound runtime and keep a single
+            // continuous spool. A missing palette color may also be revived.
+            for (let round = 0; round < 12; round++) {
+                stats.rounds = round + 1;
+                stats.stopReason = 'no-improving-transfer';
+                progress({stage: 'Redistributing windings', completed: round, total: 12});
+                const used = windingCount(layers), free = maxLines - used;
+                const errors = regionErrors(renderLayers(layers, context), context, regions);
+                const recipients = errors.filter(error => error.area > 0 && error.priority > 0)
+                    .sort((a, b) => b.priority - a.priority || a.color - b.color).slice(0, 2);
+                const donors = layers.map((layer, index) => {
+                    const trial = trimLayer(layers, index, batch);
+                    return {color: layer.color, trial, score: objective(trial, balanced)};
+                }).sort((a, b) => a.score - b.score || a.color - b.color);
+                let best = null;
+                // Removing unhelpful tail windings can itself be the best move.
+                for (const donor of donors) {
+                    const next = candidate(donor.trial);
+                    if (Number.isFinite(next) && (!best || next < best.score)) best = {...donor, score: next,
+                        details: {kind: 'remove', from: donor.color}};
+                }
+                for (const recipient of recipients) {
+                    const sources = free > 0 ? [{color: null, trial: layers}] : [];
+                    if (free < batch) sources.push(...donors.filter(donor => donor.color !== recipient.color).slice(0, 2 - sources.length));
+                    for (const donor of sources) {
+                        const trial = donor.trial.slice();
+                        let index = trial.findIndex(layer => layer.color === recipient.color);
+                        if (index < 0) {
+                            if (trial.length >= maxColors) continue;
+                            index = trial.length;
+                            trial.push({color: recipient.color, sequence: [], temporaryHarm: 0, bundles: 0});
+                        }
+                        const existing = trial[index], count = Math.max(0, existing.sequence.length - 1);
+                        const extra = Math.min(batch, maxLines - windingCount(trial));
+                        if (extra <= 0) continue;
+                        const fixed = {...existing, sequence: existing.sequence.slice(0, Math.max(1, existing.sequence.length - 16))};
+                        trial[index] = optimizeLayer(recipient.color, trial.slice(0, index), trial.slice(index + 1), count + extra, balanced, null, fixed);
+                        const valid = trial.filter(layer => layer.sequence.length > 1), next = candidate(valid);
+                        if (Number.isFinite(next) && (!best || next < best.score)) best = {trial: valid, score: next,
+                            details: {kind: 'transfer', from: donor.color, to: recipient.color}};
+                    }
+                }
+                if (!best) break;
+                accept(best.trial, best.score, best.details);
+                stats.stopReason = 'round-limit';
+            }
+        }
+        stats.finalError = cost;
+        stats.finalRegions = regionErrors(renderLayers(layers, context), context, regions);
+        stats.initialLines = windingCount(initial); stats.finalLines = windingCount(layers);
+        for (const list of [stats.initialRegions, stats.finalRegions]) for (const error of list) error.color = hex(context.palette[error.color]);
+        for (const change of stats.history) for (const key of ['color', 'from', 'to'])
+            if (change[key] !== undefined && change[key] !== null) change[key] = hex(context.palette[change[key]]);
+        return {layers, stats};
+    }
     function plan(options, progress = () => {}) {
         const context = prepare(options), palette = context.palette;
         const original = palette.map((_, i) => i);
@@ -699,16 +980,26 @@
         const backgroundThread = considerBackgroundThread(layers, context, options.maxColors, options.maxLines,
             (completed, total) => progress({stage: 'Checking background-colored thread', completed, total}));
         layers = backgroundThread.added ? reorder(backgroundThread.layers, context).layers : layers;
+        const feedback = rebalanceRegions(layers, context, options.maxColors, options.maxLines, progress);
+        layers = feedback.layers;
         const usedColors = [...new Set(layers.map(l => l.color))];
         const finalImage = renderLayers(layers, context);
+        const targetLines = context.allocation ? apportionLines(context.allocation.shares, options.maxLines) : [];
         const saved = {
             version: 2, mode: 'color', shape: options.shape, width: options.width, height: options.height,
             horizontalPins: options.horizontalPins, verticalPins: options.verticalPins, pinCount: makePins(options).length,
             background: context.backgroundName, palette: usedColors.map(i => hex(palette[i])),
             frameLongestCm: options.frameLongestCm, threadDiameterMm: options.threadDiameterMm,
+            maxLines: options.maxLines,
             render: {model: context.background === null ? TRANSPARENT_MODEL : MODEL, width: context.width, height: context.height, coverage: context.coverage},
             layers: layers.map(l => ({color: usedColors.indexOf(l.color), sequence: l.sequence})),
             stats: {errorMetric: context.background === null ? 'detail-boundary-srgb-two-backdrops-v1' : 'detail-boundary-srgb-v1',
+                allocation: context.allocation ? {method: 'region-perimeter-v1', colors: palette.map((color, i) => ({
+                    color: hex(color), perimeter: context.allocation.perimeters[i] || 0, targetLines: targetLines[i] || 0,
+                    actualLines: layers.filter(layer => layer.color === i).reduce((sum, layer) => sum + layer.sequence.length - 1, 0)}))} :
+                    {method: 'shared-gain-v1'},
+                edgeTravelEnabled: context.edgeTravel,
+                feedback: feedback.stats,
                 backgroundThreadAdded: backgroundThread.added,
                 initialError: imageError(canvas(context.size, context.background), context),
                 finalError: imageError(finalImage, context),
@@ -736,11 +1027,12 @@
         return {width, height, rgba};
     }
     function steps(plan) {
-        const result = [];
+        const result = [], pins = makePins(plan);
         for (let l = 0; l < plan.layers.length; l++) {
             const layer = plan.layers[l];
             for (let i = 1; i < layer.sequence.length; i++) result.push({layer: l, color: layer.color,
-                from: layer.sequence[i - 1], to: layer.sequence[i], tieOn: i === 1, tieOff: i === layer.sequence.length - 1});
+                from: layer.sequence[i - 1], to: layer.sequence[i], tieOn: i === 1, tieOff: i === layer.sequence.length - 1,
+                edge: segmentSide(plan, pins[layer.sequence[i - 1]], pins[layer.sequence[i]])});
         }
         return result;
     }
@@ -767,5 +1059,6 @@
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
         rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread,
-        makeBoundaries, boundaryError, imageError};
+        makeBoundaries, boundaryError, imageError, regionAllocation, apportionLines,
+        feedbackContext, regionErrors, rebalanceRegions};
 });

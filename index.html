@@ -105,6 +105,19 @@
                     <input class="form-control" id="boardColor" type="color" value="#ffffff"></div>
             </div>
             <p>Transparent plans use thread for both light and dark areas. The checkerboard shows gaps where your surroundings will remain visible. Choose a solid board if your strings will have a backing.</p>
+            <div class="form-group">
+                <label for="colorAllocation">Color allocation</label>
+                <select class="form-control" id="colorAllocation">
+                    <option value="adaptive" selected>Overall likeness</option>
+                    <option value="perimeter">Region boundaries (experimental)</option>
+                </select>
+                <p>Region boundaries gives small shapes with long outlines a larger share of the thread. This can reduce background coverage.</p>
+            </div>
+            <div class="form-group">
+                <label for="regionFeedback"><input id="regionFeedback" type="checkbox" checked> Refine color regions within the winding limit</label>
+                <p>Review the finished preview and shift windings toward poorly reproduced regions. Number of Lines is a maximum, including edge travel. The planner can finish with fewer windings.</p>
+            </div>
+            <p>On rectangular frames, a color can travel along one frame side to reach a better pin. Edge travel stays continuous and counts toward Number of Lines and string length.</p>
             <div class="row">
                 <div class="col"><label for="frameLongestCm">Longest frame side / circle diameter (cm)</label>
                     <input class="form-control" id="frameLongestCm" type="number" min="1" max="1000" step="0.1" value="60"></div>
@@ -172,7 +185,7 @@
 let IMG_SIZE = 500; // Maximum processing dimension
 let IMG_WIDTH = IMG_SIZE;
 let IMG_HEIGHT = IMG_SIZE;
-let MAX_LINES = 4000;// 4000;
+let MAX_LINES = 1600; // Maximum manual winding budget.
 let MAX_RLINES = 4000;// 4000;
 let N_PINS = 36*8;
 let N_HPINS = 36*2;

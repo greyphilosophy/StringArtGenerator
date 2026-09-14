@@ -38,6 +38,8 @@ function startColorGeneration() {
             rgba: ctx.getImageData(0, 0, IMG_WIDTH, IMG_HEIGHT).data,
             background: selectedColorBackground(),
             maxColors: Number(document.getElementById('colorCount').value),
+            colorAllocation: document.getElementById('colorAllocation').value,
+            regionFeedback: document.getElementById('regionFeedback').checked,
             maxLines: Number(numberOfLines.value),
             frameLongestCm: Number(document.getElementById('frameLongestCm').value),
             threadDiameterMm: Number(document.getElementById('threadDiameterMm').value)
@@ -115,6 +117,11 @@ function showColorSummary() {
     frame.textContent = (colorPlan.background === 'transparent' ? 'Open frame · Transparent background' : 'Solid board ' + colorPlan.background) +
         ' · Longest side / diameter ' + colorPlan.frameLongestCm + ' cm · Thread diameter ' + colorPlan.threadDiameterMm + ' mm';
     summary.appendChild(frame);
+    if (colorPlan.maxLines !== undefined) {
+        const budget = document.createElement('p');
+        budget.textContent = 'This plan uses ' + colorSteps.length + ' of the ' + colorPlan.maxLines + ' maximum windings, including edge travel.';
+        summary.appendChild(budget);
+    }
     const list = document.createElement('ol');
     for (const item of ColorPlanner.shoppingList(colorPlan)) {
         const li = document.createElement('li');
@@ -182,6 +189,7 @@ function paintColorProgress(highlight) {
     const step = colorSteps[colorStepIndex - 1], color = colorPlan.palette[step.color].toUpperCase();
     incrementalCurrentStep.textContent = 'Line ' + colorStepIndex + '/' + colorSteps.length + ' · Layer ' + (step.layer + 1) +
         ' · Thread ' + color + ' · ' + (step.tieOn ? 'Tie on at pin ' : 'Pin ') + step.from + ' → ' + step.to +
+        (step.edge ? ' · Along the ' + step.edge + ' edge' : '') +
         (step.tieOff ? ' · Tie off here' : '');
     if (highlight) {
         ctx3.beginPath();
