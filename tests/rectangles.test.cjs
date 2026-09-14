@@ -142,3 +142,19 @@ test('invalid rectangle pin spacing is reported before image processing', () => 
     assert.match(h.element('status').textContent, /25 vertical pins/);
     assert.equal(h.images.length, 0);
 });
+
+test('color uploads preserve the original crop at 1280 pixels before worker planning', () => {
+    for (const [rectangle, source, crop, output] of [
+        [true, [1600, 1200], [0, 0, 1600, 1200], [1280, 960]],
+        [true, [1200, 1600], [0, 0, 1200, 1600], [960, 1280]],
+        [false, [1600, 1200], [200, 0, 1200, 1200], [1280, 1280]]
+    ]) {
+        const h = harness();
+        h.element('renderMode').value = 'color';
+        h.element('inlineRadio2').checked = rectangle;
+        Object.assign(h.element('imageSrc'), {naturalWidth: source[0], naturalHeight: source[1]});
+        h.run('startColorGeneration = () => { globalThis.workerSize = [IMG_WIDTH, IMG_HEIGHT]; }; imgElement.onload();');
+        assert.deepEqual(h.images[0], [...crop, 0, 0, ...output]);
+        assert.deepEqual(JSON.parse(h.run('JSON.stringify(workerSize)')), output);
+    }
+});

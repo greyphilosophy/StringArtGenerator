@@ -280,9 +280,11 @@ imgElement.onload = function() {
     let selectedHeight = sourceHeight;
     let xOffset = 0;
     let yOffset = 0;
-    IMG_WIDTH = IMG_HEIGHT = IMG_SIZE;
+    const colorMode = document.getElementById('renderMode').value === 'color';
+    const processingSize = colorMode ? ColorPlanner.MAX_SOURCE_DIMENSION : IMG_SIZE;
+    IMG_WIDTH = IMG_HEIGHT = processingSize;
     if (isRectangle) {
-        const scale = IMG_SIZE / Math.max(sourceWidth, sourceHeight);
+        const scale = processingSize / Math.max(sourceWidth, sourceHeight);
         IMG_WIDTH = Math.max(2, Math.round(sourceWidth * scale));
         IMG_HEIGHT = Math.max(2, Math.round(sourceHeight * scale));
     } else {
@@ -309,7 +311,6 @@ imgElement.onload = function() {
     ctx2.canvas.width = IMG_WIDTH * 2;
     ctx2.canvas.height = IMG_HEIGHT * 2;
     ctx.globalCompositeOperation = 'source-over';
-    const colorMode = document.getElementById('renderMode').value === 'color';
     ctx.canvas.classList.toggle('transparent-preview', colorMode && selectedColorBackground() === 'transparent');
     ctx.canvas.style.backgroundColor = colorMode ? selectedColorBackground() : '';
     if (!colorMode) {

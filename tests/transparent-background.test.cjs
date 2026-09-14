@@ -47,12 +47,12 @@ test('transparent source pixels stay empty and their hidden RGB never seeds thre
 });
 
 test('transparent input is area-averaged without adding a white or black matte', () => {
-    const options = fixture(); options.width = 480; options.height = 360;
+    const options = fixture(); options.width = 960; options.height = 720;
     options.rgba = new Uint8ClampedArray(options.width * options.height * 4);
     for (let y = 0; y < options.height; y++) for (let x = 0; x < options.width; x++)
         options.rgba.set(x % 2 ? [255, 0, 0, 0] : [255, 255, 255, 255], (y * options.width + x) * 4);
     const context = C.prepare(options);
-    assert.deepEqual([context.width, context.height], [320, 240]);
+    assert.deepEqual([context.width, context.height], [640, 480]);
     // The first output cell uses source column 0. The second averages columns
     // 1 (transparent red) and 2 (opaque white), with no matte or hidden red.
     close(context.target.alpha[0], 1);
