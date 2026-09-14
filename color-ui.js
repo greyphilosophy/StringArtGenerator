@@ -38,6 +38,7 @@ function startColorGeneration() {
             rgba: ctx.getImageData(0, 0, IMG_WIDTH, IMG_HEIGHT).data,
             background: selectedColorBackground(),
             maxColors: Number(document.getElementById('colorCount').value),
+            colorAllocation: document.getElementById('colorAllocation').value,
             maxLines: Number(numberOfLines.value),
             frameLongestCm: Number(document.getElementById('frameLongestCm').value),
             threadDiameterMm: Number(document.getElementById('threadDiameterMm').value)
@@ -182,6 +183,7 @@ function paintColorProgress(highlight) {
     const step = colorSteps[colorStepIndex - 1], color = colorPlan.palette[step.color].toUpperCase();
     incrementalCurrentStep.textContent = 'Line ' + colorStepIndex + '/' + colorSteps.length + ' · Layer ' + (step.layer + 1) +
         ' · Thread ' + color + ' · ' + (step.tieOn ? 'Tie on at pin ' : 'Pin ') + step.from + ' → ' + step.to +
+        (step.edge ? ' · Along the ' + step.edge + ' edge' : '') +
         (step.tieOff ? ' · Tie off here' : '');
     if (highlight) {
         ctx3.beginPath();
