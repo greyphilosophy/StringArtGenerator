@@ -69,8 +69,8 @@ test('upload → worker → shopping list → colored playback → fresh-session
         assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.classList.contains('transparent-preview')), true);
         assert.equal(await p.locator('#canvasOutput2').evaluate(c => c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 === 3 && v < 255)), true);
         assert.ok(plan.palette.length > 0 && plan.palette.length <= 5);
-        assert.equal(plan.width / plan.height, 500 / 300);
-        assert.deepEqual([plan.render.width, plan.render.height], [320, 192]);
+        assert.deepEqual([plan.width, plan.height], [1280, 768]);
+        assert.deepEqual([plan.render.width, plan.render.height], [640, 384]);
         assert.match(await p.locator('#colorSummary').innerText(), /buy about/);
         assert.match(await p.locator('#colorSummary').innerText(), /of the 60 maximum windings, including edge travel/);
         await p.getByRole('button', {name: 'Just Draw', exact: true}).click();
@@ -118,8 +118,8 @@ test('portrait layout, cancelled work and invalid input recover cleanly', async 
         const plan = await generate(p, 180, 300, 25);
         assert.equal(plan.stats.allocation.method, 'shared-gain-v1');
         assert.equal(plan.stats.feedback.enabled, false);
-        assert.equal(plan.width / plan.height, 300 / 500);
-        assert.deepEqual([plan.render.width, plan.render.height], [192, 320]);
+        assert.deepEqual([plan.width, plan.height], [768, 1280]);
+        assert.deepEqual([plan.render.width, plan.render.height], [384, 640]);
         const dims = await p.locator('#canvasOutput2').evaluate(c => ({w: c.width, h: c.height, box: c.getBoundingClientRect().toJSON()}));
         assert.equal(dims.w / dims.h, 0.6);
         assert.ok(Math.abs(dims.box.width / dims.box.height - 0.6) < 0.01);

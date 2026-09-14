@@ -211,19 +211,25 @@ test('existing version 2 paths still use the original linear-light coverage mode
     assert.deepEqual(Array.from(rgba.slice(4, 8)), [255, 255, 255, 255]);
 });
 
-test('320-pixel color plans survive saved replay and older plans retain their stored resolution', () => {
-    const options = {...fixture(500, 375), maxColors: 2, maxLines: 12};
+test('640-pixel color plans survive saved replay and older plans retain their stored resolution', () => {
+    const options = {...fixture(1280, 960), maxColors: 2, maxLines: 12, frameLongestCm: 131, threadDiameterMm: 0.4};
     const plan = C.plan(options), rendered = C.render(plan);
-    assert.deepEqual([plan.render.width, plan.render.height], [320, 240]);
-    assert.deepEqual([rendered.width, rendered.height, rendered.rgba.length], [320, 240, 320 * 240 * 4]);
+    assert.deepEqual([plan.render.width, plan.render.height], [640, 480]);
+    assert.deepEqual([rendered.width, rendered.height, rendered.rgba.length], [640, 480, 640 * 480 * 4]);
+    close(plan.render.coverage, options.threadDiameterMm * 639 / (options.frameLongestCm * 10));
     assert.ok(C.steps(plan).length > 0 && C.steps(plan).length <= options.maxLines);
     assert.deepEqual(rendered, C.render(JSON.parse(JSON.stringify(plan))));
-    const older = structuredClone(plan);
-    older.render = {...older.render, width: 160, height: 120, coverage: 0.1};
-    const oldRender = C.render(older);
-    assert.deepEqual([oldRender.width, oldRender.height], [160, 120], 'replay uses the saved size, not the new generation default');
-    const oversized = structuredClone(plan); oversized.render.width = 321;
+    for (const [width, height] of [[160, 120], [320, 240]]) {
+        const older = {...structuredClone(plan), width: 500, height: 375};
+        older.render = {...older.render, width, height, coverage: 0.1};
+        const oldRender = C.render(older);
+        assert.deepEqual([oldRender.width, oldRender.height], [width, height], 'replay uses the saved size, not the new generation default');
+        assert.equal(older.render.coverage, 0.1);
+    }
+    const oversized = structuredClone(plan); oversized.render.width = 641;
     assert.throws(() => C.validatePlan(oversized), 'working images remain bounded');
+    assert.throws(() => C.plan({...options, width: 1281}), 'source images remain bounded too');
+    assert.throws(() => C.plan({...options, horizontalPins: 200, verticalPins: 200}), 'more pixels do not raise the pin limit');
 });
 
 test('rasterization is direction-independent, bounded and shares corner aliases', () => {

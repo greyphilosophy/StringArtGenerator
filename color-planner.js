@@ -6,7 +6,8 @@
     'use strict';
     const MODEL = 'linear-coverage-v1';
     const TRANSPARENT_MODEL = 'linear-coverage-alpha-v1';
-    const MAX_WORKING_DIMENSION = 320;
+    const MAX_WORKING_DIMENSION = 640;
+    const MAX_SOURCE_DIMENSION = 1280;
     const CHANNEL_WEIGHTS = [0.2126, 0.7152, 0.0722];
     const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
     const toLinear = x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
@@ -39,7 +40,7 @@
     }
     function validateFrame(frame) {
         const int = (n, lo, hi) => Number.isInteger(n) && n >= lo && n <= hi;
-        if (!['circle', 'rectangle'].includes(frame.shape) || !int(frame.width, 2, 500) || !int(frame.height, 2, 500) ||
+        if (!['circle', 'rectangle'].includes(frame.shape) || !int(frame.width, 2, MAX_SOURCE_DIMENSION) || !int(frame.height, 2, MAX_SOURCE_DIMENSION) ||
             (frame.shape === 'circle' && (frame.width !== frame.height || !int(frame.pinCount, 3, 500))) ||
             (frame.shape === 'rectangle' && (!int(frame.horizontalPins, 2, frame.width) ||
                 !int(frame.verticalPins, 2, frame.height) || 2 * (frame.horizontalPins + frame.verticalPins) > 500))) {
@@ -1055,7 +1056,7 @@
             return {color, layers, lines, pathMetres: metres, suggestedMetres: Math.ceil(metres * 1.2 + layers.length)};
         });
     }
-    return {plan, render, steps, shoppingList, validatePlan, makePins,
+    return {plan, render, steps, shoppingList, validatePlan, makePins, MAX_SOURCE_DIMENSION,
         // Export numerical primitives for small, hand-verifiable regressions.
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
         rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread,
