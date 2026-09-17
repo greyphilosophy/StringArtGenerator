@@ -265,6 +265,7 @@
         const cache = new Map();
         return {
             pins,
+            nailKey(pin) { return aliases[pin]; },
             side(a, b) { return segmentSide(frame, sourcePins[a], sourcePins[b]); },
             line(a, b) {
                 const key = [aliases[a], aliases[b]].sort().join(':');
@@ -603,6 +604,7 @@
             !['adaptive', 'perimeter'].includes(colorAllocation) ||
             (options.edgeTravel !== undefined && typeof options.edgeTravel !== 'boolean') ||
             (options.regionFeedback !== undefined && typeof options.regionFeedback !== 'boolean') ||
+            (options.reduceWindings !== undefined && typeof options.reduceWindings !== 'boolean') ||
             !Number.isInteger(options.maxColors) || options.maxColors < 1 || options.maxColors > 5 ||
             !Number.isInteger(options.maxLines) || options.maxLines < 1 || options.maxLines > 10000 ||
             !Number.isFinite(options.frameLongestCm) || options.frameLongestCm <= 0 || options.frameLongestCm > 1000 ||
@@ -637,6 +639,7 @@
             weights: detailWeights(displayTarget, mask, width, height), raster: rasterizer(options, width, height),
             boundaries: makeBoundaries(displayTarget, mask, width, height),
             palette, edgeTravel: options.shape === 'rectangle' && options.edgeTravel !== false, regionFeedback: options.regionFeedback !== false,
+            reduceWindings: options.reduceWindings === true,
             allocation: colorAllocation === 'perimeter' ? regionAllocation(target, palette, background, mask, width, height) : null};
     }
     function allocateLayers(order, budget, context, progress) {
@@ -947,6 +950,83 @@
             if (change[key] !== undefined && change[key] !== null) change[key] = hex(context.palette[change[key]]);
         return {layers, stats};
     }
+    // Remove only tails or closed excursions. Surviving segments retain their
+    // original geometry and each spool remains continuous, including aliases
+    // of the same physical corner. No interior chord is silently replaced.
+    function windingReductions(layers, raster) {
+        const candidates = [], key = pin => raster.nailKey ? raster.nailKey(pin) : pin;
+        layers.forEach((layer, index) => {
+            const sequence = layer.sequence, count = sequence.length - 1;
+            const tails = new Set([count]);
+            for (let n = 1; n < count; n *= 2) tails.add(n);
+            for (const removed of tails) candidates.push({layer: index, start: count - removed, end: count, removed, kind: 'tail'});
+            const last = new Map(), loops = [];
+            for (let end = 0; end < sequence.length; end++) {
+                const nail = key(sequence[end]), start = last.get(nail);
+                if (start !== undefined && end - start > 1 && end - start <= 64)
+                    loops.push({layer: index, start, end, removed: end - start, kind: 'loop'});
+                last.set(nail, end);
+            }
+            // Sample throughout long spools rather than looking only near the
+            // beginning. Bound the search independently of the winding budget.
+            const limit = Math.min(24, loops.length);
+            for (let i = 0; i < limit; i++) candidates.push(loops[Math.floor((i + 0.5) * loops.length / limit)]);
+        });
+        return candidates.sort((a, b) => b.removed - a.removed || a.layer - b.layer || a.start - b.start);
+    }
+    function removeWindingExcursion(layers, candidate) {
+        const trial = layers.slice(), layer = layers[candidate.layer];
+        const sequence = layer.sequence.slice(0, candidate.start + 1).concat(layer.sequence.slice(candidate.end + 1));
+        if (sequence.length < 2) trial.splice(candidate.layer, 1);
+        else trial[candidate.layer] = {...layer, sequence};
+        return trial;
+    }
+    function reduceWindings(initial, context, progress = () => {}) {
+        if (!context.reduceWindings) return {layers: initial, stats: {enabled: false}};
+        const tolerance = 0.01, maxAttempts = 160, maxChanges = 32;
+        const regions = regionAllocation(context.target, context.palette, context.background, context.mask, context.width, context.height);
+        const measure = data => ({
+            pixel: pixelError(data, context.target, context.displayTarget, context.weights),
+            boundary: boundaryError(data, context.boundaries),
+            regions: regionErrors(data, context, regions)
+        });
+        const baseline = measure(renderLayers(initial, context));
+        const within = (next, before) => next <= before * (1 + tolerance) + 1e-10;
+        const acceptable = next => within(next.pixel, baseline.pixel) && within(next.boundary, baseline.boundary) &&
+            next.regions.every((region, i) => within(region.meanColorError, baseline.regions[i].meanColorError) &&
+                within(region.meanBoundaryError, baseline.regions[i].meanBoundaryError));
+        let layers = initial, measured = baseline;
+        const stats = {enabled: true, method: 'bounded-winding-reduction-v1', tolerance,
+            initialLines: windingCount(initial), attempts: 0, history: [], stopReason: 'no-acceptable-removal'};
+        while (stats.attempts < maxAttempts && stats.history.length < maxChanges && layers.length) {
+            let accepted = false;
+            for (const candidate of windingReductions(layers, context.raster)) {
+                if (stats.attempts >= maxAttempts) break;
+                progress({stage: 'Reducing low-impact windings', completed: stats.attempts, total: maxAttempts});
+                stats.attempts++;
+                const trial = removeWindingExcursion(layers, candidate);
+                const next = measure(renderLayers(trial, context));
+                // Every comparison uses the SAME pre-reduction image, never
+                // the last accepted image. The 1% allowance cannot accumulate.
+                // Both transparent backdrops and all later layers are included.
+                if (!acceptable(next)) continue;
+                stats.history.push({kind: candidate.kind, color: hex(context.palette[layers[candidate.layer].color]),
+                    removed: candidate.removed, linesBefore: windingCount(layers), linesAfter: windingCount(trial),
+                    pixelError: next.pixel, boundaryError: next.boundary});
+                layers = trial; measured = next; accepted = true;
+                break;
+            }
+            if (!accepted) break;
+        }
+        if (!layers.length) stats.stopReason = 'empty-plan';
+        else if (stats.attempts >= maxAttempts || stats.history.length >= maxChanges) stats.stopReason = 'search-limit';
+        stats.finalLines = windingCount(layers); stats.removedLines = stats.initialLines - stats.finalLines;
+        stats.initialPixelError = baseline.pixel; stats.finalPixelError = measured.pixel;
+        stats.initialBoundaryError = baseline.boundary; stats.finalBoundaryError = measured.boundary;
+        const savedRegions = list => list.map(region => ({...region, color: hex(context.palette[region.color])}));
+        stats.initialRegions = savedRegions(baseline.regions); stats.finalRegions = savedRegions(measured.regions);
+        return {layers, stats};
+    }
     function plan(options, progress = () => {}) {
         const context = prepare(options), palette = context.palette;
         const original = palette.map((_, i) => i);
@@ -981,7 +1061,8 @@
             (completed, total) => progress({stage: 'Checking background-colored thread', completed, total}));
         layers = backgroundThread.added ? reorder(backgroundThread.layers, context).layers : layers;
         const feedback = rebalanceRegions(layers, context, options.maxColors, options.maxLines, progress);
-        layers = feedback.layers;
+        const reduction = reduceWindings(feedback.layers, context, progress);
+        layers = reduction.layers;
         const usedColors = [...new Set(layers.map(l => l.color))];
         const finalImage = renderLayers(layers, context);
         const targetLines = context.allocation ? apportionLines(context.allocation.shares, options.maxLines) : [];
@@ -1000,6 +1081,7 @@
                     {method: 'shared-gain-v1'},
                 edgeTravelEnabled: context.edgeTravel,
                 feedback: feedback.stats,
+                windingReduction: reduction.stats,
                 backgroundThreadAdded: backgroundThread.added,
                 initialError: imageError(canvas(context.size, context.background), context),
                 finalError: imageError(finalImage, context),
@@ -1060,5 +1142,5 @@
         rgb, hex, canvas, pixelError, applyLine, scoreLine, suffixTransform, choosePalette,
         rasterizer, chooseMoves, objective, prepare, reorder, detailWeights, allocateLayers, considerBackgroundThread,
         makeBoundaries, boundaryError, imageError, regionAllocation, apportionLines,
-        feedbackContext, regionErrors, rebalanceRegions};
+        feedbackContext, regionErrors, rebalanceRegions, windingReductions, removeWindingExcursion, reduceWindings};
 });
