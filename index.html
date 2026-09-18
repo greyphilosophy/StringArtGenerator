@@ -118,6 +118,10 @@
                 <p>Review the finished preview and shift windings toward poorly reproduced regions. Number of Lines is a maximum, including edge travel. The planner can finish with fewer windings.</p>
             </div>
             <p>On rectangular frames, a color can travel along one frame side to reach a better pin. Edge travel stays continuous and counts toward Number of Lines and string length.</p>
+            <div class="form-group">
+                <label for="reduceWindings"><input id="reduceWindings" type="checkbox"> Reduce low-impact windings (experimental)</label>
+                <p>Trim redundant loops and path endings after planning. Allow up to 1% more measured color and outline error, checked for the whole image and every color region. Useful repeat passes stay; each spool remains continuous.</p>
+            </div>
             <div class="row">
                 <div class="col"><label for="frameLongestCm">Longest frame side / circle diameter (cm)</label>
                     <input class="form-control" id="frameLongestCm" type="number" min="1" max="1000" step="0.1" value="60"></div>
